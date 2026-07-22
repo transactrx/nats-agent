@@ -104,3 +104,22 @@ resp, _ := reg.Run(ctx, "create_chart", wire.ToolRunRequest{Input: input, UserID
 `go test ./...` runs the e2e suite against an embedded NATS server: discovery
 filters, chat streaming and event ordering, cancellation, sessions, tool
 hosting, protocol-vs-model-visible errors, and live registry pickup.
+
+## CLI: nats-agents
+
+Operator tool for the mesh, in `cmd/nats-agents` (released with the library —
+binaries on each GitHub release, `brew install transactrx/tap/nats-agents`):
+
+```
+nats-agents list                  # discover agents (cards table; --json for raw)
+nats-agents tools                 # discover network tools
+nats-agents card copayAssistant   # full agent card
+nats-agents tool create_chart     # full tool card
+nats-agents ping copayAssistant   # liveness
+nats-agents chat copayAssistant "How many claims failed yesterday?"
+nats-agents run create_chart '{"chart":{...}}'
+```
+
+Connection: `$NATS_URL` / `$NATS_JWT` / `$NATS_KEY`, or `-s`, `--creds file`,
+`--jwt/--seed`. `chat` streams text to stdout with tool/status progress on
+stderr; `run` prints the ToolRunResponse and exits non-zero on tool error.
