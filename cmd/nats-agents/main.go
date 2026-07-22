@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -43,12 +44,22 @@ Commands:
 
 Flags:
   -s, --server URL      NATS server URL (default: $NATS_URL)
+      --context NAME    NATS CLI context (from ~/.config/nats/context);
+                        the selected default context is used when nothing
+                        else specifies a server
       --creds FILE      NATS .creds file (JWT + seed)
+      --nkey FILE       NATS NKey seed file
       --jwt STRING      NATS user JWT (default: $NATS_JWT)
       --seed STRING     NATS user NKey seed (default: $NATS_KEY)
       --timeout DUR     Discovery window / request timeout (default 3s)
       --json            Raw JSON output instead of tables
       --version         Print version and exit
+
+Connection resolution — nats CLI contexts are first-class: with no options,
+the selected default context is used (just like the nats CLI itself).
+Explicit -s/--server or --context win; $NATS_URL applies only when no
+context is selected. --creds/--nkey/--jwt+--seed override the context's
+credentials.
 
 Examples:
   nats-agents list
@@ -59,7 +70,9 @@ Examples:
 
 type config struct {
 	server  string
+	context string
 	creds   string
+	nkey    string
 	jwt     string
 	seed    string
 	timeout time.Duration
@@ -74,7 +87,9 @@ func main() {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 	fs.StringVar(&cfg.server, "s", "", "")
 	fs.StringVar(&cfg.server, "server", "", "")
+	fs.StringVar(&cfg.context, "context", "", "")
 	fs.StringVar(&cfg.creds, "creds", "", "")
+	fs.StringVar(&cfg.nkey, "nkey", "", "")
 	fs.StringVar(&cfg.jwt, "jwt", "", "")
 	fs.StringVar(&cfg.seed, "seed", "", "")
 	fs.DurationVar(&cfg.timeout, "timeout", 3*time.Second, "")
@@ -144,33 +159,156 @@ func main() {
 	}
 }
 
+// natsContext represents a NATS CLI context configuration
+// (~/.config/nats/context/<name>.json) — same shape nats-discover reads.
+type natsContext struct {
+	URL         string `json:"url"`
+	User        string `json:"user,omitempty"`
+	Password    string `json:"password,omitempty"`
+	Token       string `json:"token,omitempty"`
+	Creds       string `json:"creds,omitempty"`
+	NKey        string `json:"nkey,omitempty"`
+	Cert        string `json:"cert,omitempty"`
+	Key         string `json:"key,omitempty"`
+	CA          string `json:"ca,omitempty"`
+	JWT         string `json:"jwt,omitempty"`
+	Seed        string `json:"seed,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// connect resolves the server and credentials with nats CLI contexts as a
+// first-class citizen: explicit flags win (-s / --context), otherwise the
+// nats CLI's selected default context is used — running with no options at
+// all behaves exactly like the nats CLI itself. $NATS_URL is the fallback
+// when no context is selected (CI, containers, the bastion). Explicit
+// credential flags override the context's credentials, and
+// $NATS_JWT/$NATS_KEY fill in when nothing else supplied auth.
 func connect(cfg config) (*nats.Conn, error) {
-	url := cfg.server
-	if url == "" {
-		url = os.Getenv("NATS_URL")
-	}
-	if url == "" {
-		return nil, fmt.Errorf("no NATS server: set -s/--server or $NATS_URL")
-	}
+	var url string
 	var opts []nats.Option
+	haveAuth := false
+
+	useContext := func(ctx *natsContext) {
+		url = ctx.URL
+		ctxOpts := contextToOptions(ctx)
+		haveAuth = len(ctxOpts) > 0
+		opts = append(opts, ctxOpts...)
+	}
+
 	switch {
-	case cfg.creds != "":
-		opts = append(opts, nats.UserCredentials(cfg.creds))
+	case cfg.server != "":
+		url = cfg.server
+	case cfg.context != "":
+		ctx, err := loadNatsContext(cfg.context)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load context %q: %w", cfg.context, err)
+		}
+		useContext(ctx)
 	default:
-		jwt := cfg.jwt
-		if jwt == "" {
-			jwt = os.Getenv("NATS_JWT")
-		}
-		seed := cfg.seed
-		if seed == "" {
-			seed = os.Getenv("NATS_KEY")
-		}
-		if jwt != "" && seed != "" {
-			opts = append(opts, nats.UserJWTAndSeed(jwt, seed))
+		if ctx, err := loadDefaultContext(); err == nil {
+			useContext(ctx)
+		} else if envURL := os.Getenv("NATS_URL"); envURL != "" {
+			url = envURL
+		} else {
+			return nil, fmt.Errorf("no NATS server specified: use -s, --context, select a nats CLI context, or set $NATS_URL (%v)", err)
 		}
 	}
+
+	// Explicit credential flags override whatever the context provided.
+	if cfg.creds != "" {
+		opts = append(opts, nats.UserCredentials(cfg.creds))
+		haveAuth = true
+	}
+	if cfg.nkey != "" {
+		opt, err := nats.NkeyOptionFromSeed(cfg.nkey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load NKey: %w", err)
+		}
+		opts = append(opts, opt)
+		haveAuth = true
+	}
+	jwt, seed := cfg.jwt, cfg.seed
+	if jwt == "" && seed == "" && !haveAuth {
+		jwt, seed = os.Getenv("NATS_JWT"), os.Getenv("NATS_KEY")
+	}
+	if jwt != "" && seed != "" {
+		opts = append(opts, nats.UserJWTAndSeed(jwt, seed))
+	}
+
 	opts = append(opts, nats.Name("nats-agents-cli"))
 	return nats.Connect(url, opts...)
+}
+
+// getNatsConfigDirs returns possible NATS config directories in order of
+// preference: ~/.config/nats (where the nats CLI stores contexts), then
+// os.UserConfigDir() as fallback (~/Library/Application Support on macOS).
+func getNatsConfigDirs() []string {
+	var dirs []string
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".config", "nats"))
+	}
+	if configDir, err := os.UserConfigDir(); err == nil {
+		dirs = append(dirs, filepath.Join(configDir, "nats"))
+	}
+	return dirs
+}
+
+func loadNatsContext(name string) (*natsContext, error) {
+	for _, dir := range getNatsConfigDirs() {
+		data, err := os.ReadFile(filepath.Join(dir, "context", name+".json"))
+		if err != nil {
+			continue
+		}
+		var ctx natsContext
+		if err := json.Unmarshal(data, &ctx); err != nil {
+			return nil, fmt.Errorf("invalid context file: %w", err)
+		}
+		return &ctx, nil
+	}
+	return nil, fmt.Errorf("context %q not found", name)
+}
+
+func loadDefaultContext() (*natsContext, error) {
+	for _, dir := range getNatsConfigDirs() {
+		data, err := os.ReadFile(filepath.Join(dir, "context.txt"))
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(string(data))
+		if name == "" {
+			continue
+		}
+		return loadNatsContext(name)
+	}
+	return nil, fmt.Errorf("no default context found")
+}
+
+func contextToOptions(ctx *natsContext) []nats.Option {
+	var opts []nats.Option
+	if ctx.User != "" && ctx.Password != "" {
+		opts = append(opts, nats.UserInfo(ctx.User, ctx.Password))
+	}
+	if ctx.Token != "" {
+		opts = append(opts, nats.Token(ctx.Token))
+	}
+	if ctx.Creds != "" {
+		opts = append(opts, nats.UserCredentials(ctx.Creds))
+	}
+	if ctx.NKey != "" {
+		if opt, err := nats.NkeyOptionFromSeed(ctx.NKey); err == nil {
+			opts = append(opts, opt)
+		}
+	}
+	if ctx.JWT != "" && ctx.Seed != "" {
+		opts = append(opts, nats.UserJWTAndSeed(ctx.JWT, ctx.Seed))
+	}
+	if ctx.Cert != "" && ctx.Key != "" {
+		opts = append(opts, nats.ClientCert(ctx.Cert, ctx.Key))
+	}
+	if ctx.CA != "" {
+		opts = append(opts, nats.RootCAs(ctx.CA))
+	}
+	return opts
 }
 
 func chat(ctx context.Context, ac *agentclient.Client, agent, text string, cfg config) {
