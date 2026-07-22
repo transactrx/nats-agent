@@ -120,6 +120,10 @@ nats-agents chat copayAssistant "How many claims failed yesterday?"
 nats-agents run create_chart '{"chart":{...}}'
 ```
 
-Connection: `$NATS_URL` / `$NATS_JWT` / `$NATS_KEY`, or `-s`, `--creds file`,
-`--jwt/--seed`. `chat` streams text to stdout with tool/status progress on
-stderr; `run` prints the ToolRunResponse and exits non-zero on tool error.
+Connection: nats CLI contexts are first-class — with no options the CLI uses
+the context selected via `nats context select` (same files as the nats CLI,
+`~/.config/nats`). Override with `-s`, `--context NAME`, `--creds`, `--nkey`,
+or `--jwt/--seed`; `$NATS_URL`/`$NATS_JWT`/`$NATS_KEY` apply when no context
+is selected (CI, containers, bastion). `chat` streams text to stdout with
+tool/status progress on stderr; `run` prints the ToolRunResponse and exits
+non-zero on tool error.
