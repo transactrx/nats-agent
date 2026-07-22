@@ -2,6 +2,7 @@ package natsagent_test
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,41 @@ func TestCLI(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "[tool] echo") || !strings.Contains(stderr, "[done] endTurn") {
 			t.Errorf("chat progress events missing:\nstderr: %s", stderr)
+		}
+	})
+
+	t.Run("nats context resolution", func(t *testing.T) {
+		// A fake HOME with a nats CLI context pointing at the embedded
+		// server; no -s flag and no NATS_URL in the environment.
+		home := t.TempDir()
+		ctxDir := filepath.Join(home, ".config", "nats", "context")
+		if err := os.MkdirAll(ctxDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ctxJSON := []byte(`{"url":"` + testURL + `","description":"embedded test server"}`)
+		if err := os.WriteFile(filepath.Join(ctxDir, "embedded.json"), ctxJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+
+		// Explicit --context
+		cmd := exec.Command(bin, "--context", "embedded", "--timeout", "700ms", "list")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "testAgent") {
+			t.Errorf("--context list failed: %v\n%s", err, out)
+		}
+
+		// The context selected via `nats context select` (context.txt) is
+		// used with no options at all — and wins over $NATS_URL.
+		if err := os.WriteFile(filepath.Join(home, ".config", "nats", "context.txt"), []byte("embedded\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command(bin, "--timeout", "700ms", "tools")
+		cmd.Env = append(env, "NATS_URL=nats://selected-context-should-win.invalid:4222")
+		out, err = cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "echo") {
+			t.Errorf("selected-context tools failed (context must beat $NATS_URL): %v\n%s", err, out)
 		}
 	})
 
