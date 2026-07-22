@@ -1,0 +1,40 @@
+version: 2
+
+project_name: nats-agents
+
+builds:
+  - main: ./cmd/nats-agents
+    binary: nats-agents
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+brews:
+  - repository:
+      owner: transactrx
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/transactrx/nats-agent
+    description: CLI to discover and drive NATS Agent Protocol agents and network tools
+    license: MIT
+    install: |
+      bin.install "nats-agents"
+    test: |
+      system "#{bin}/nats-agents", "--version"
