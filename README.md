@@ -9,6 +9,12 @@ so every agent and tool endpoint is also visible to `nats-discover` and uses
 the same error envelope and env conventions (`NATS_URL`, `NATS_JWT`,
 `NATS_KEY`).
 
+Building an agent? Read
+[IDENTITY-AND-AUTHORITY.md §1](IDENTITY-AND-AUTHORITY.md#1-what-to-assume-when-building-agents-today)
+first — requests will carry a verified identity token, permission enforcement
+belongs in your deterministic code rather than the model, and today's `userId`
+field is not yet authenticated.
+
 | Package | Role |
 |---|---|
 | `pkg/wire` | Wire types of the protocol (cards, events, requests) — language-neutral shapes |
