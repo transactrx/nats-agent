@@ -24,6 +24,16 @@ control and permissions are a later stage; the wire contract already carries
 `userId` and `metadata` end-to-end so enforcement can be added without
 breaking changes.
 
+**Security direction (non-normative).** Requests will eventually carry a
+verified identity token, and every agent will enforce permissions in its own
+deterministic layer — never in the model or its prompt. Note that today's
+`userId` (§5.1) is an *unauthenticated assertion by the caller*: do not build
+authority decisions on it. See
+[IDENTITY-AND-AUTHORITY.md](IDENTITY-AND-AUTHORITY.md) for the design
+discussion, including agents as `app_id`/`app_functions` principals,
+role-and-context authority, delegation, user-owned sessions and storage, and
+scheduled execution on a user's behalf.
+
 ---
 
 ## 1. Design goals
