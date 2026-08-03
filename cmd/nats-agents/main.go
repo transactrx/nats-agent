@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -39,7 +40,9 @@ Commands:
   card <agent>          Fetch one agent's full card
   tool <name>           Fetch one tool's full card
   ping <agent>          Agent liveness probe
-  chat <agent> <text>   Run one streaming chat turn; prints the reply live
+  chat <agent> [text]   Chat with an agent; prints the reply live. With no
+                        text, starts an interactive multi-turn conversation
+                        (the agent keeps context between turns)
   run <tool> <json>     Execute a network tool with a JSON input object
 
 Flags:
@@ -53,6 +56,10 @@ Flags:
       --seed STRING     NATS user NKey seed (default: $NATS_KEY)
       --timeout DUR     Discovery window / request timeout (default 3s)
       --json            Raw JSON output instead of tables
+      --session ID      Resume an existing chat session (chat only); every
+                        turn prints its session id, and interactive mode
+                        prints a resume command on exit
+      --user ID         User id for session scoping (chat only)
       --version         Print version and exit
 
 Connection resolution — nats CLI contexts are first-class: with no options,
@@ -65,6 +72,8 @@ Examples:
   nats-agents list
   nats-agents tools --json
   nats-agents chat copayAssistant "How many claims failed yesterday?"
+  nats-agents chat copayAssistant                       (interactive)
+  nats-agents chat copayAssistant --session 6a2f... "and the day before?"
   nats-agents run create_chart '{"chart":{"type":"bar","data":{"labels":["A"],"datasets":[{"data":[1]}]}}}'
 `
 
@@ -77,6 +86,8 @@ type config struct {
 	seed    string
 	timeout time.Duration
 	asJSON  bool
+	session string
+	user    string
 }
 
 func main() {
@@ -94,6 +105,8 @@ func main() {
 	fs.StringVar(&cfg.seed, "seed", "", "")
 	fs.DurationVar(&cfg.timeout, "timeout", 3*time.Second, "")
 	fs.BoolVar(&cfg.asJSON, "json", false, "")
+	fs.StringVar(&cfg.session, "session", "", "")
+	fs.StringVar(&cfg.user, "user", "", "")
 	fs.BoolVar(&showVersion, "version", false, "")
 	_ = fs.Parse(os.Args[1:])
 
@@ -147,8 +160,17 @@ func main() {
 		exitIf(err)
 		printJSON(resp)
 	case "chat":
-		requireArg(rest, 2, "chat <agent> <text>")
-		chat(ctx, ac, rest[0], strings.Join(rest[1:], " "), cfg)
+		requireArg(rest, 1, "chat <agent> [text]")
+		// One more re-parse so flags may also follow the agent name
+		// (`chat myAgent --session ID "text"`), same convention as
+		// flags-after-command.
+		agentName := rest[0]
+		_ = fs.Parse(rest[1:])
+		if text := fs.Args(); len(text) == 0 {
+			chatInteractive(ctx, ac, agentName, cfg)
+		} else {
+			chat(ctx, ac, agentName, strings.Join(text, " "), cfg)
+		}
 	case "run":
 		requireArg(rest, 2, "run <tool> <json-input>")
 		runTool(ctx, tc, rest[0], rest[1], cfg)
@@ -312,12 +334,67 @@ func contextToOptions(ctx *natsContext) []nats.Option {
 }
 
 func chat(ctx context.Context, ac *agentclient.Client, agent, text string, cfg config) {
+	_, err := chatTurn(ctx, ac, agent, text, cfg.session, cfg)
+	if err != nil {
+		fatal("[error] %v", err)
+	}
+}
+
+// chatInteractive is a multi-turn REPL: every turn is sent with the session
+// id from the previous ack (or --session to resume an old conversation), so
+// the agent keeps the whole conversation's context. Exit with "exit",
+// "quit", or Ctrl-D; a turn-level error is printed but keeps the session
+// alive.
+func chatInteractive(ctx context.Context, ac *agentclient.Client, agent string, cfg config) {
+	sessionID := cfg.session
+	if sessionID != "" {
+		fmt.Fprintf(os.Stderr, "chatting with %s (resuming session %s) — exit, quit, or Ctrl-D to leave\n", agent, sessionID)
+	} else {
+		fmt.Fprintf(os.Stderr, "chatting with %s — exit, quit, or Ctrl-D to leave\n", agent)
+	}
+
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for {
+		fmt.Fprintf(os.Stderr, "\n%s> ", agent)
+		if !sc.Scan() {
+			fmt.Fprintln(os.Stderr)
+			break
+		}
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		if text == "exit" || text == "quit" {
+			break
+		}
+		sid, err := chatTurn(ctx, ac, agent, text, sessionID, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[error] %v\n", err)
+		}
+		if sid != "" {
+			sessionID = sid
+		}
+	}
+	if sessionID != "" {
+		fmt.Fprintf(os.Stderr, "resume this conversation with: nats-agents chat %s --session %s\n", agent, sessionID)
+	}
+}
+
+// chatTurn runs one streaming turn and returns the session id from the ack
+// so callers can chain turns. Run-level errors are returned, not fatal'd.
+func chatTurn(ctx context.Context, ac *agentclient.Client, agent, text, sessionID string, cfg config) (string, error) {
 	run, err := ac.Chat(ctx, agent, wire.ChatRequest{
-		Message: wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: text}}},
+		SessionID: sessionID,
+		UserID:    cfg.user,
+		Message:   wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: text}}},
 	})
-	exitIf(err)
+	if err != nil {
+		return sessionID, err
+	}
 	fmt.Fprintf(os.Stderr, "run %s session %s (instance %s)\n", run.Ack.RunID, run.Ack.SessionID, run.Ack.InstanceID)
 
+	var runErr error
 	for ev := range run.Events {
 		if cfg.asJSON {
 			printJSON(ev)
@@ -329,7 +406,11 @@ func chat(ctx context.Context, ac *agentclient.Client, agent, text string, cfg c
 		case wire.EventStatus:
 			fmt.Fprintf(os.Stderr, "[status] %s\n", ev.StatusText)
 		case wire.EventToolUse:
-			fmt.Fprintf(os.Stderr, "[tool] %s %s\n", ev.ToolName, compact(ev.ToolInput, 120))
+			input := compact(ev.ToolInput, 120)
+			if input == "" || input == "null" {
+				input = "{}"
+			}
+			fmt.Fprintf(os.Stderr, "[tool] %s %s\n", ev.ToolName, input)
 		case wire.EventToolResult:
 			outcome := "ok"
 			if ev.ToolError != "" {
@@ -343,9 +424,10 @@ func chat(ctx context.Context, ac *agentclient.Client, agent, text string, cfg c
 			fmt.Fprintf(os.Stderr, "[done] %s\n", ev.StopReason)
 		case wire.EventError:
 			fmt.Printf("\n")
-			fatal("[error] %s", ev.Error)
+			runErr = fmt.Errorf("%s", ev.Error)
 		}
 	}
+	return run.Ack.SessionID, runErr
 }
 
 func runTool(ctx context.Context, tc *toolclient.Client, name, rawInput string, cfg config) {
