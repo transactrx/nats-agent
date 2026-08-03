@@ -123,6 +123,8 @@ nats-agents card copayAssistant   # full agent card
 nats-agents tool create_chart     # full tool card
 nats-agents ping copayAssistant   # liveness
 nats-agents chat copayAssistant "How many claims failed yesterday?"
+nats-agents chat copayAssistant   # no text: interactive multi-turn chat
+nats-agents chat copayAssistant --session 6a2f... "and the day before?"
 nats-agents run create_chart '{"chart":{...}}'
 ```
 
@@ -133,3 +135,10 @@ or `--jwt/--seed`; `$NATS_URL`/`$NATS_JWT`/`$NATS_KEY` apply when no context
 is selected (CI, containers, bastion). `chat` streams text to stdout with
 tool/status progress on stderr; `run` prints the ToolRunResponse and exits
 non-zero on tool error.
+
+`chat` with no message text starts an interactive conversation: every turn
+is sent with the session id from the previous ack, so agents that persist
+sessions keep the whole conversation's context (exit, quit, or Ctrl-D to
+leave — it prints a `--session` command to resume the same conversation
+later). `--session ID` resumes a session in one-shot mode too, and `--user ID`
+sets the user id sessions are scoped under.
