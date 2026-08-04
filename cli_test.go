@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -85,6 +86,57 @@ func TestCLI(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "[tool] echo") || !strings.Contains(stderr, "[done] endTurn") {
 			t.Errorf("chat progress events missing:\nstderr: %s", stderr)
+		}
+	})
+
+	sessionRe := regexp.MustCompile(`run run_\S+ session (\S+)`)
+	sessionFromStderr := func(t *testing.T, stderr string) string {
+		t.Helper()
+		m := sessionRe.FindStringSubmatch(stderr)
+		if m == nil {
+			t.Fatalf("no session id in stderr:\n%s", stderr)
+		}
+		return m[1]
+	}
+
+	t.Run("chat --session resumes", func(t *testing.T) {
+		_, stderr1, err := cli("chat", "testAgent", "first turn")
+		if err != nil {
+			t.Fatalf("chat: %v\nstderr: %s", err, stderr1)
+		}
+		sid := sessionFromStderr(t, stderr1)
+
+		_, stderr2, err := cli("chat", "testAgent", "--session", sid, "second turn")
+		if err != nil {
+			t.Fatalf("chat --session: %v\nstderr: %s", err, stderr2)
+		}
+		if got := sessionFromStderr(t, stderr2); got != sid {
+			t.Errorf("session not resumed: sent %s, ack says %s", sid, got)
+		}
+	})
+
+	t.Run("chat interactive keeps one session", func(t *testing.T) {
+		cmd := exec.Command(bin, "-s", testURL, "--timeout", "700ms", "chat", "testAgent")
+		cmd.Stdin = strings.NewReader("turn one\nturn two\nexit\n")
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("interactive chat: %v\nstderr: %s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "you said: turn one") || !strings.Contains(stdout.String(), "you said: turn two") {
+			t.Errorf("interactive replies missing:\nstdout: %s", stdout.String())
+		}
+		// Both turns must share one session, and the exit hint must name it.
+		var sids []string
+		for _, m := range sessionRe.FindAllStringSubmatch(stderr.String(), -1) {
+			sids = append(sids, m[1])
+		}
+		if len(sids) != 2 || sids[0] != sids[1] {
+			t.Errorf("expected 2 turns on one session, got %v\nstderr: %s", sids, stderr.String())
+		}
+		if len(sids) == 2 && !strings.Contains(stderr.String(), "--session "+sids[0]) {
+			t.Errorf("resume hint missing:\nstderr: %s", stderr.String())
 		}
 	})
 
