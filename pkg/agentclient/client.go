@@ -134,13 +134,39 @@ func scatterGather(ctx context.Context, nc *nats.Conn, subject string, req any, 
 	}
 }
 
+type idtCtxKey struct{}
+
+// WithIDT returns a context carrying the caller's Internal Delegation Token.
+// Every authenticated call (Chat, Invoke, Sessions*) made with this context
+// sends it as the X-TRX-IDT NATS header. Empty idt is a no-op.
+func WithIDT(ctx context.Context, idt string) context.Context {
+	if idt == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, idtCtxKey{}, idt)
+}
+
+// IDTFromContext returns the token set by WithIDT, or "".
+func IDTFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(idtCtxKey{}).(string)
+	return v
+}
+
+func idtHeader(ctx context.Context) nats_service_client.Header {
+	idt := IDTFromContext(ctx)
+	if idt == "" {
+		return nil
+	}
+	return nats_service_client.Header{wire.HeaderIDT: []string{idt}}
+}
+
 // requestJSON does one documented request/reply against an agent endpoint.
-func requestJSON[T any](c *Client, subject string, body any) (*T, error) {
+func requestJSON[T any](ctx context.Context, c *Client, subject string, body any) (*T, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	resp, svcErr, err := c.svc.DoRequest("", subject, nil, data, c.timeout)
+	resp, svcErr, err := c.svc.DoRequest("", subject, idtHeader(ctx), data, c.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", subject, err)
 	}
@@ -156,12 +182,12 @@ func requestJSON[T any](c *Client, subject string, body any) (*T, error) {
 
 // Card fetches one agent's card directly.
 func (c *Client) Card(ctx context.Context, agent string) (*wire.AgentCard, error) {
-	return requestJSON[wire.AgentCard](c, wire.AgentSubject(agent, "card"), struct{}{})
+	return requestJSON[wire.AgentCard](ctx, c, wire.AgentSubject(agent, "card"), struct{}{})
 }
 
 // Ping checks agent liveness.
 func (c *Client) Ping(ctx context.Context, agent string) (*wire.PingResponse, error) {
-	return requestJSON[wire.PingResponse](c, wire.AgentSubject(agent, "ping"), struct{}{})
+	return requestJSON[wire.PingResponse](ctx, c, wire.AgentSubject(agent, "ping"), struct{}{})
 }
 
 // Run is one live chat turn: the ack plus the event stream. The Events
@@ -200,7 +226,7 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 		return nil, fmt.Errorf("subscribing to stream subject: %w", err)
 	}
 
-	ack, err := requestJSON[wire.ChatAck](c, wire.AgentSubject(agent, "chat"), req)
+	ack, err := requestJSON[wire.ChatAck](ctx, c, wire.AgentSubject(agent, "chat"), req)
 	if err != nil {
 		sub.Unsubscribe()
 		return nil, err
@@ -281,27 +307,27 @@ func (c *Client) Cancel(ctx context.Context, agent, runID string) (bool, error) 
 // Invoke runs a synchronous turn (capability "sync").
 func (c *Client) Invoke(ctx context.Context, agent string, req wire.ChatRequest) (*wire.InvokeResponse, error) {
 	req.StreamSubject = ""
-	return requestJSON[wire.InvokeResponse](c, wire.AgentSubject(agent, "invoke"), req)
+	return requestJSON[wire.InvokeResponse](ctx, c, wire.AgentSubject(agent, "invoke"), req)
 }
 
 // ─── Sessions (capability "sessions") ─────────────────────────────────────
 
 func (c *Client) SessionsList(ctx context.Context, agent, userID string) (*wire.SessionsListResponse, error) {
-	return requestJSON[wire.SessionsListResponse](c, wire.AgentSubject(agent, "sessionsList"), wire.SessionsListRequest{UserID: userID})
+	return requestJSON[wire.SessionsListResponse](ctx, c, wire.AgentSubject(agent, "sessionsList"), wire.SessionsListRequest{UserID: userID})
 }
 
 func (c *Client) SessionGet(ctx context.Context, agent, userID, sessionID string) (*wire.SessionGetResponse, error) {
-	return requestJSON[wire.SessionGetResponse](c, wire.AgentSubject(agent, "sessionsGet"), wire.SessionGetRequest{UserID: userID, SessionID: sessionID})
+	return requestJSON[wire.SessionGetResponse](ctx, c, wire.AgentSubject(agent, "sessionsGet"), wire.SessionGetRequest{UserID: userID, SessionID: sessionID})
 }
 
 func (c *Client) SessionDelete(ctx context.Context, agent, userID, sessionID string) (*wire.SessionDeleteResponse, error) {
-	return requestJSON[wire.SessionDeleteResponse](c, wire.AgentSubject(agent, "sessionsDelete"), wire.SessionDeleteRequest{UserID: userID, SessionID: sessionID})
+	return requestJSON[wire.SessionDeleteResponse](ctx, c, wire.AgentSubject(agent, "sessionsDelete"), wire.SessionDeleteRequest{UserID: userID, SessionID: sessionID})
 }
 
 func (c *Client) SessionRename(ctx context.Context, agent, userID, sessionID, title string) (*wire.SessionRenameResponse, error) {
-	return requestJSON[wire.SessionRenameResponse](c, wire.AgentSubject(agent, "sessionsRename"), wire.SessionRenameRequest{UserID: userID, SessionID: sessionID, Title: title})
+	return requestJSON[wire.SessionRenameResponse](ctx, c, wire.AgentSubject(agent, "sessionsRename"), wire.SessionRenameRequest{UserID: userID, SessionID: sessionID, Title: title})
 }
 
 func (c *Client) SessionSetFavorite(ctx context.Context, agent, userID, sessionID string, favorite bool) (*wire.SessionSetFavoriteResponse, error) {
-	return requestJSON[wire.SessionSetFavoriteResponse](c, wire.AgentSubject(agent, "sessionsSetFavorite"), wire.SessionSetFavoriteRequest{UserID: userID, SessionID: sessionID, Favorite: favorite})
+	return requestJSON[wire.SessionSetFavoriteResponse](ctx, c, wire.AgentSubject(agent, "sessionsSetFavorite"), wire.SessionSetFavoriteRequest{UserID: userID, SessionID: sessionID, Favorite: favorite})
 }

@@ -37,6 +37,9 @@ type Turn struct {
 	wire.ChatRequest
 	RunID  string
 	Logger *log.Logger
+	// Identity is the runtime's verdict on the caller (see IDTValidation).
+	// When Identity.Verified, UserID has been replaced by the verified id.
+	Identity Identity
 }
 
 // ChatHandler runs one streaming chat turn. Emit events through the stream;
@@ -396,10 +399,18 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	if req.SessionID == "" {
 		req.SessionID = uuid.New().String()
 	}
+	id, aerr := a.idt.authorize(msg.Header.Get(wire.HeaderIDT), req.SessionID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if id.Verified {
+		req.UserID = id.UserID
+	}
 	return &Turn{
 		ChatRequest: req,
 		RunID:       "run_" + uuid.New().String(),
 		Logger:      msg.Logger,
+		Identity:    id,
 	}, nil
 }
 

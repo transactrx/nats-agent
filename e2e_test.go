@@ -3,8 +3,10 @@ package natsagent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -571,3 +573,165 @@ func TestToolRegistryPickup(t *testing.T) {
 type renamedEcho struct{ echoTool }
 
 func (renamedEcho) Name() string { return "echo_late" }
+
+// ─── IDT enforcement ──────────────────────────────────────────────────────
+
+// startFakeIdentity answers validateInternalToken on the embedded server.
+// grant maps idt → (userId); tokens not in the map are DENIED_FN; "revoked"
+// is TOKEN_REVOKED.
+func startFakeIdentity(t *testing.T, subject string, grant map[string]string) *int32 {
+	t.Helper()
+	nc := testConn(t)
+	var calls int32
+	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
+		atomic.AddInt32(&calls, 1)
+		var req struct {
+			IDT        string `json:"idt"`
+			AgentID    string `json:"agentId"`
+			FunctionID string `json:"functionId"`
+		}
+		_ = json.Unmarshal(m.Data, &req)
+		resp := map[string]any{"valid": true, "functionGranted": false, "reason": "DENIED_FN"}
+		if req.IDT == "revoked.x" {
+			resp = map[string]any{"valid": false, "functionGranted": false, "reason": "TOKEN_REVOKED"}
+		} else if u, ok := grant[req.IDT]; ok && req.AgentID == "appTest" && req.FunctionID == "fnTest" {
+			resp = map[string]any{"valid": true, "functionGranted": true, "userId": u, "accountId": "acc1", "reason": nil}
+		}
+		data, _ := json.Marshal(resp)
+		_ = m.Respond(data)
+	})
+	if err != nil {
+		t.Fatalf("fake identity subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	return &calls
+}
+
+func startSecuredAgent(t *testing.T, name, identitySubject string, observe bool) (*memSessionStore, *[]string) {
+	t.Helper()
+	store := newMemSessionStore()
+	var seenUsers []string
+	var mu sync.Mutex
+	a, err := agent.New(agent.Config{
+		Name:        name,
+		Description: "Secured agent for IDT tests.",
+		NATSURL:     testURL,
+		Access:      &wire.AgentAccess{AppID: "appTest", FunctionID: "fnTest"},
+		IDTValidation: &agent.IDTValidation{
+			Enabled: true, ObserveOnly: observe, Subject: identitySubject, Timeout: 2 * time.Second, CacheTTL: time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	a.UseSessionStore(store)
+	a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
+		mu.Lock()
+		seenUsers = append(seenUsers, turn.UserID+"|"+fmt.Sprint(turn.Identity.Verified)+"|"+turn.Identity.IDT)
+		mu.Unlock()
+		stream.Text("ok")
+		stream.Done(wire.StopEndTurn, nil)
+		return nil
+	})
+	if err := a.Start(); err != nil {
+		t.Fatalf("agent.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+	return store, &seenUsers
+}
+
+func TestIDTChatAllowedDeniedMissing(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	calls := startFakeIdentity(t, subj, map[string]string{"IDT-good.c": "alice"})
+	_, seen := startSecuredAgent(t, "securedAgent", subj, false)
+	c := agentclient.NewFromConn(testConn(t))
+	msg := wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}
+
+	// allowed: verified user overrides caller-asserted userId
+	run, err := c.Chat(agentclient.WithIDT(context.Background(), "IDT-good.c"), "securedAgent",
+		wire.ChatRequest{UserID: "mallory", SessionID: "s1", Message: msg})
+	if err != nil {
+		t.Fatalf("allowed chat: %v", err)
+	}
+	for range run.Events {
+	}
+	if len(*seen) != 1 || (*seen)[0] != "alice|true|IDT-good.c" {
+		t.Fatalf("handler saw %v, want verified alice", *seen)
+	}
+
+	// denied function → 403 before ack
+	_, err = c.Chat(agentclient.WithIDT(context.Background(), "IDT-bad.c"), "securedAgent", wire.ChatRequest{Message: msg})
+	assertForbidden(t, err, "DENIED_FN")
+
+	// revoked token
+	_, err = c.Chat(agentclient.WithIDT(context.Background(), "revoked.x"), "securedAgent", wire.ChatRequest{Message: msg})
+	assertForbidden(t, err, "TOKEN_REVOKED")
+
+	// missing header
+	_, err = c.Chat(context.Background(), "securedAgent", wire.ChatRequest{Message: msg})
+	assertForbidden(t, err, "MISSING_IDT")
+
+	// card is public and carries access
+	card, err := c.Card(context.Background(), "securedAgent")
+	if err != nil || card.Access == nil || card.Access.FunctionID != "fnTest" {
+		t.Fatalf("card must be public with access: %+v %v", card, err)
+	}
+	if atomic.LoadInt32(calls) < 3 {
+		t.Fatalf("identity should have been consulted, calls=%d", *calls)
+	}
+}
+
+func TestIDTSessionsGatedAndUserOverridden(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{"IDT-good.c": "alice"})
+	store, _ := startSecuredAgent(t, "securedSessions", subj, false)
+	store.put("alice", wire.SessionGetResponse{SessionID: "s-alice", Title: "mine"})
+	store.put("bob", wire.SessionGetResponse{SessionID: "s-bob", Title: "his"})
+	c := agentclient.NewFromConn(testConn(t))
+
+	// bob's id in the body, alice's token → alice's sessions
+	resp, err := c.SessionsList(agentclient.WithIDT(context.Background(), "IDT-good.c"), "securedSessions", "bob")
+	if err != nil {
+		t.Fatalf("sessionsList: %v", err)
+	}
+	if len(resp.Sessions) != 1 || resp.Sessions[0].SessionID != "s-alice" {
+		t.Fatalf("verified identity must override body userId: %+v", resp.Sessions)
+	}
+	_, err = c.SessionsList(context.Background(), "securedSessions", "alice")
+	assertForbidden(t, err, "MISSING_IDT")
+}
+
+func TestIDTObserveOnlyPassesThrough(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{})
+	_, seen := startSecuredAgent(t, "observeAgent", subj, true)
+	c := agentclient.NewFromConn(testConn(t))
+	run, err := c.Chat(context.Background(), "observeAgent", wire.ChatRequest{UserID: "u", Message: wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("observe-only must not block: %v", err)
+	}
+	for range run.Events {
+	}
+	if len(*seen) != 1 || (*seen)[0] != "u|false|" {
+		t.Fatalf("observe-only must keep caller userId, unverified: %v", *seen)
+	}
+}
+
+func TestIDTMisconfigRejectedAtNew(t *testing.T) {
+	_, err := agent.New(agent.Config{Name: "bad", Description: "d", NATSURL: testURL,
+		IDTValidation: &agent.IDTValidation{Enabled: true}})
+	if err == nil {
+		t.Fatal("IDT_VALIDATION without Access must fail agent.New")
+	}
+}
+
+func assertForbidden(t *testing.T, err error, reason string) {
+	t.Helper()
+	var se *agentclient.ServiceError
+	if !errors.As(err, &se) {
+		t.Fatalf("want ServiceError, got %v", err)
+	}
+	if se.Status != 403 || se.ApiStatusCode != wire.CodeForbidden || se.ErrorMessage != reason {
+		t.Fatalf("want 403/%d/%s, got %d/%d/%s", wire.CodeForbidden, reason, se.Status, se.ApiStatusCode, se.ErrorMessage)
+	}
+}
