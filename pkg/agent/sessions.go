@@ -67,7 +67,7 @@ func (a *Agent) sessionRegistrations() []nats_service.EndpointRegistration {
 // authorizeSession applies IDT enforcement to a sessions endpoint. sessionID
 // may be "" (list). On a verified identity the body's userId is replaced.
 func (a *Agent) authorizeSession(msg *nats_service.NatsMessage, userID *string, sessionID string) *nats_service.NatsServiceError {
-	id, aerr := a.idt.authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
+	id, aerr := a.Authorize(msg, sessionID)
 	if aerr != nil {
 		return aerr
 	}

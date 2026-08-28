@@ -108,6 +108,8 @@ Rules:
   `agent.<name>` so exactly **one instance per agent** replies.
 - Agents MAY register additional endpoints in their own space; discovery of
   those goes through the agent card (`endpoints` field) and `nats-discover`.
+  Agent-specific extension endpoints are unauthenticated unless the agent
+  calls the library's `Authorize` helper (Go: `(*agent.Agent).Authorize`).
 
 ## 4. Discovery
 

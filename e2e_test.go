@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
 	"github.com/transactrx/nats-agent/pkg/agent"
 	"github.com/transactrx/nats-agent/pkg/agentclient"
@@ -860,6 +861,85 @@ func TestIDTCardAndPingNeverSendHeader(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ping request was never observed")
+	}
+}
+
+// TestExtensionEndpointAuthorize proves an AddEndpoint extension can enforce
+// IDT itself via the exported Authorize helper: a raw request with no header
+// gets the standard 403 envelope, and a request with a granted header
+// reaches the handler.
+func TestExtensionEndpointAuthorize(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{"IDT-good.c": "alice"})
+
+	a, err := agent.New(agent.Config{
+		Name:        "securedExtension",
+		Description: "Secured agent with an extension endpoint.",
+		NATSURL:     testURL,
+		Access:      &wire.AgentAccess{AppID: "appTest", FunctionID: "fnTest"},
+		IDTValidation: &agent.IDTValidation{
+			Enabled: true, Subject: subj, Timeout: 2 * time.Second, CacheTTL: time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
+		stream.Done(wire.StopEndTurn, nil)
+		return nil
+	})
+	if err := a.AddEndpoint(nats_service.EndpointRegistration{
+		Path:        "secret",
+		Description: "Extension endpoint gated by Authorize.",
+		Handler: func(msg *nats_service.NatsMessage) *nats_service.NatsServiceError {
+			if _, aerr := a.Authorize(msg, ""); aerr != nil {
+				return aerr
+			}
+			msg.ResponseBody = []byte(`{"ok":true}`)
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	if err := a.Start(); err != nil {
+		t.Fatalf("agent.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+
+	nc := testConn(t)
+	subject := wire.AgentSubject("securedExtension", "secret")
+
+	// No IDT header at all: denied with the standard error envelope (403 /
+	// 4031), same as a built-in endpoint would produce.
+	deniedMsg := nats.NewMsg(subject)
+	deniedMsg.Data = []byte(`{}`)
+	reply, err := nc.RequestMsg(deniedMsg, 2*time.Second)
+	if err != nil {
+		t.Fatalf("raw request: %v", err)
+	}
+	var envelope struct {
+		Status        int    `json:"status"`
+		ErrorMessage  string `json:"errorMessage"`
+		ApiStatusCode int    `json:"apiStatusCode"`
+	}
+	if err := json.Unmarshal(reply.Data, &envelope); err != nil {
+		t.Fatalf("decoding error envelope: %v (%s)", err, reply.Data)
+	}
+	if envelope.Status != 403 || envelope.ApiStatusCode != wire.CodeForbidden || envelope.ErrorMessage != "MISSING_IDT" {
+		t.Fatalf("want 403/%d/MISSING_IDT, got %+v", wire.CodeForbidden, envelope)
+	}
+
+	// Allowed IDT header: the handler runs and its body comes back.
+	allowedMsg := nats.NewMsg(subject)
+	allowedMsg.Data = []byte(`{}`)
+	allowedMsg.Header = nats.Header{}
+	allowedMsg.Header.Set(wire.HeaderIDT, "IDT-good.c")
+	reply, err = nc.RequestMsg(allowedMsg, 2*time.Second)
+	if err != nil {
+		t.Fatalf("allowed raw request: %v", err)
+	}
+	if string(reply.Data) != `{"ok":true}` {
+		t.Fatalf("want handler body, got %s", reply.Data)
 	}
 }
 

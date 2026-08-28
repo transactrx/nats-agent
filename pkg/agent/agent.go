@@ -125,6 +125,14 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Access == nil {
 		cfg.Access = accessFromEnv()
 	}
+	// A caller-supplied Access must be complete regardless of whether IDT
+	// validation is enabled: a partial Access still ends up on the public
+	// card, and downstream identity checks treat an empty functionId as
+	// BAD_REQUEST for every caller.
+	if cfg.Access != nil && (cfg.Access.AppID == "" || cfg.Access.FunctionID == "") {
+		return nil, fmt.Errorf("agent %q: Access requires both AppID and FunctionID (got appId=%q functionId=%q)",
+			cfg.Name, cfg.Access.AppID, cfg.Access.FunctionID)
+	}
 	if cfg.IDTValidation == nil {
 		v := IDTValidationFromEnv()
 		cfg.IDTValidation = &v
@@ -161,9 +169,12 @@ func New(cfg Config) (*Agent, error) {
 		svc.SetRepositoryURL(cfg.RepositoryURL)
 	}
 
+	idt := newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
 	if cfg.IDTValidation.Enabled {
+		// Log the validator's effective (defaulted) subject, not
+		// cfg.IDTValidation.Subject, which may still be "" here.
 		log.Printf("agent %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v cacheTTL=%s)",
-			cfg.Name, cfg.IDTValidation.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
+			cfg.Name, idt.cfg.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
 	}
 
 	return &Agent{
@@ -171,7 +182,7 @@ func New(cfg Config) (*Agent, error) {
 		svc:  svc,
 		nc:   svc.GetNatsService(),
 		runs: map[string]*run{},
-		idt:  newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil),
+		idt:  idt,
 	}, nil
 }
 
@@ -198,6 +209,14 @@ func (a *Agent) AddEndpoint(reg nats_service.EndpointRegistration) error {
 // Conn exposes the underlying NATS connection (e.g. for a tool registry
 // sharing the connection).
 func (a *Agent) Conn() *nats.Conn { return a.nc }
+
+// Authorize checks msg's X-TRX-IDT header against this agent's configured
+// access function. Use from AddEndpoint handlers that expose user data;
+// returns the 403 envelope to hand back on deny. Built-in chat/invoke/
+// sessions endpoints call this automatically.
+func (a *Agent) Authorize(msg *nats_service.NatsMessage, sessionID string) (Identity, *nats_service.NatsServiceError) {
+	return a.idt.authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
+}
 
 // Card builds the agent card from the config and wired capabilities.
 func (a *Agent) Card() wire.AgentCard {
@@ -399,7 +418,7 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	if req.SessionID == "" {
 		req.SessionID = uuid.New().String()
 	}
-	id, aerr := a.idt.authorize(msg.Header.Get(wire.HeaderIDT), req.SessionID)
+	id, aerr := a.Authorize(msg, req.SessionID)
 	if aerr != nil {
 		return nil, aerr
 	}

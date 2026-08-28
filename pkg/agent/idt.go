@@ -63,21 +63,33 @@ func IDTValidationFromEnv() IDTValidation {
 	if raw := strings.TrimSpace(os.Getenv("IDT_VALIDATE_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			c.Timeout = time.Duration(n) * time.Second
+		} else {
+			log.Printf("IDT_METRIC event=config.warn var=IDT_VALIDATE_TIMEOUT_SECONDS value=%q using_default=%s", raw, defaultValidateTimeout)
 		}
 	}
 	if raw := strings.TrimSpace(os.Getenv("IDT_VALIDATE_CACHE_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
 			c.CacheTTL = time.Duration(n) * time.Second
+		} else {
+			log.Printf("IDT_METRIC event=config.warn var=IDT_VALIDATE_CACHE_SECONDS value=%q using_default=%s", raw, defaultValidateCacheTTL)
 		}
 	}
 	return c
 }
 
 // accessFromEnv is the Config.Access fallback (APP_ID / APP_FUNCTION_ID).
+// Returns nil unless BOTH are set: a partial declaration (e.g. APP_ID with no
+// APP_FUNCTION_ID) would otherwise advertise a card with an empty
+// functionId, which downstream identity checks treat as BAD_REQUEST for
+// every caller.
 func accessFromEnv() *wire.AgentAccess {
 	appID := strings.TrimSpace(os.Getenv("APP_ID"))
 	fnID := strings.TrimSpace(os.Getenv("APP_FUNCTION_ID"))
 	if appID == "" && fnID == "" {
+		return nil
+	}
+	if appID == "" || fnID == "" {
+		log.Printf("IDT_METRIC event=access.misconfig reason=partial_env")
 		return nil
 	}
 	return &wire.AgentAccess{AppID: appID, FunctionID: fnID}
@@ -179,6 +191,9 @@ const idPrefixLogMax = 40
 // let "IDT-<same-uuid>.<forged-cipher>" ride an existing allow.
 func idPrefix(idt string) string {
 	if i := strings.IndexByte(idt, '.'); i >= 0 {
+		if i > idPrefixLogMax {
+			return idt[:idPrefixLogMax]
+		}
 		return idt[:i]
 	}
 	if len(idt) > idPrefixLogMax {
