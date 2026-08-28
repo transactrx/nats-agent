@@ -60,8 +60,9 @@ Flags:
                         turn prints its session id, and interactive mode
                         prints a resume command on exit
       --user ID         User id for session scoping (chat only)
-      --idt TOKEN       Internal Delegation Token sent as X-TRX-IDT on
-                        chat/run (default: $TRX_IDT)
+      --idt TOKEN       Internal Delegation Token sent as X-TRX-IDT on agent
+                        chat/invoke/sessions calls (default: $TRX_IDT); tool
+                        run does not use it
       --version         Print version and exit
 
 Connection resolution — nats CLI contexts are first-class: with no options,

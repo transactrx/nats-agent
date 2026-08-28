@@ -163,5 +163,5 @@ sessions keep the whole conversation's context (exit, quit, or Ctrl-D to
 leave — it prints a `--session` command to resume the same conversation
 later). `--session ID` resumes a session in one-shot mode too, and `--user ID`
 sets the user id sessions are scoped under. `--idt TOKEN` (default `$TRX_IDT`)
-sends the Internal Delegation Token as `X-TRX-IDT` for agents with IDT
-validation enabled.
+sends the Internal Delegation Token as `X-TRX-IDT` on `chat` for agents with
+IDT validation enabled; `run` (network tool execution) does not use it.

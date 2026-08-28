@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.1
+# NATS Agent Protocol — Specification v1.1 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -421,7 +421,7 @@ Same envelope as every transactrx service (`nats-service`
 |---|---|
 | 4001 | Invalid body (JSON unmarshal failed) |
 | 4002 | Missing required field |
-| 4031 | Forbidden — IDT missing, invalid, or function not granted (message = reason: MISSING_IDT, DENIED_FN, TOKEN_REVOKED, SESSION_EXPIRED, TOKEN_NOT_FOUND, VALIDATE_ERROR) |
+| 4031 | Forbidden — IDT missing, invalid, or function not granted (message = reason: MISSING_IDT, DENIED_FN, TOKEN_REVOKED, SESSION_EXPIRED, TOKEN_NOT_FOUND, VALIDATE_ERROR, INVALID_IDENTITY, INVALID_IDT) |
 | 4041 | Unknown session |
 | 4042 | Unknown run (cancel) |
 | 4291 | Agent busy / at capacity |
