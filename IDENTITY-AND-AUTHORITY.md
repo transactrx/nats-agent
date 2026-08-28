@@ -90,6 +90,9 @@ therefore has no sound basis for an authority decision today.
 The fix is a verified token on the request, with `userId` and context derived
 from its claims. This is an additive change to the wire contract.
 
+**Implemented 2026-08:** inbound token on `X-TRX-IDT`, verified before ack,
+`userId` derived when verified.
+
 ---
 
 ## 4. Delegation across the mesh
@@ -180,14 +183,20 @@ inbound token, expose the *effective authority* to agent code, and refuse tool
 calls outside the agent's declared functions. Teams should not hand-roll this;
 if correct enforcement is optional, it will be optional.
 
+**Implemented:** card `access` = registration; enforcement in
+`pkg/agent/idt.go`.
+
 ---
 
 ## 10. Build order (when resumed)
 
 1. **Delegated identity token** — verified inbound token, derived `userId` +
    context, intersected authority, downscoped delegation for onward calls.
-   Everything else depends on it.
+   Everything else depends on it. **Done (inbound part), 2026-08:** verified
+   inbound token, derived `userId`. Downscoped delegation for onward calls is
+   still open.
 2. **Agent card ↔ app registration**, plus library-provided enforcement.
+   **Done, 2026-08.**
 3. **User-owned session/thread service** with context labels and normalized
    transcripts.
 4. **User storage service** (§7).

@@ -31,6 +31,7 @@ a, err := agent.New(agent.Config{
     Description: "Data analyst for the copay programs platform.",
     Version:     "1.0.0",
     Skills:      []wire.Skill{{Name: "sql", Description: "Answers questions from the copay database."}},
+    Access:      &wire.AgentAccess{AppID: "copayassistanceAppId", FunctionID: "copayassistanceFnId"},
 })
 if err != nil { log.Panic(err) } // fail fast
 
@@ -54,11 +55,31 @@ queue group `agent.copayAssistant`, the agent card, discovery replies on
 `trx.agent.discover`, run tracking + broadcast `cancel`, stream heartbeats
 (≤15s), and terminal-event guarantees (panics become `error` events).
 
+`Access` registers the agent with the identity model — omit it (or leave
+`Config.Access` nil) to fall back to `APP_ID`/`APP_FUNCTION_ID` from the
+environment. `Config.IDTValidation` turns on inbound `X-TRX-IDT` checks on
+`chat`/`invoke`/`sessions*` (nil → read from env); when enabled, a request
+without a valid token gets the error envelope (403 / 4031) instead of an ack,
+and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
+
+| Env var | Meaning |
+|---|---|
+| `APP_ID` / `APP_FUNCTION_ID` | Fallback for `Config.Access` |
+| `IDT_VALIDATION` | Enable inbound token checks |
+| `IDT_OBSERVE_ONLY` | Validate + log, never block |
+| `IDT_FAIL_OPEN` | Allow when identity is unreachable (never for a missing token) |
+| `NATS_IDENTITY_BASE_PATH` | Identity service subject prefix (default `trx.identityservice`) |
+| `NATS_IDENTITY_VALIDATE_SUBJECT` | Validate subject suffix (default `validateInternalToken`) |
+| `IDT_VALIDATE_TIMEOUT_SECONDS` | Per-call timeout (default 5s) |
+| `IDT_VALIDATE_CACHE_SECONDS` | Cache TTL, keyed on sha256(token)+session+app+function (default 300s; deny and observe-only results are never cached) |
+
 ## Talking to an agent
 
 ```go
 c, _ := agentclient.New()
 cards, _ := c.Discover(ctx, wire.DiscoverFilter{}, 0) // every agent on the mesh
+
+ctx = agentclient.WithIDT(ctx, callerIDT) // sent as X-TRX-IDT on chat/invoke/sessions*
 
 run, _ := c.Chat(ctx, "copayAssistant", wire.ChatRequest{
     UserID:  "manuel",
@@ -141,4 +162,6 @@ is sent with the session id from the previous ack, so agents that persist
 sessions keep the whole conversation's context (exit, quit, or Ctrl-D to
 leave — it prints a `--session` command to resume the same conversation
 later). `--session ID` resumes a session in one-shot mode too, and `--user ID`
-sets the user id sessions are scoped under.
+sets the user id sessions are scoped under. `--idt TOKEN` (default `$TRX_IDT`)
+sends the Internal Delegation Token as `X-TRX-IDT` for agents with IDT
+validation enabled.
