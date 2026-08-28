@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,7 +24,7 @@ import (
 type IDTValidation struct {
 	Enabled     bool          // IDT_VALIDATION
 	ObserveOnly bool          // IDT_OBSERVE_ONLY: validate + log, never block
-	FailOpen    bool          // IDT_FAIL_OPEN: allow when identity is unreachable
+	FailOpen    bool          // IDT_FAIL_OPEN: allow when identity is unreachable; never for a missing token
 	Subject     string        // NATS_IDENTITY_BASE_PATH + "." + NATS_IDENTITY_VALIDATE_SUBJECT
 	Timeout     time.Duration // IDT_VALIDATE_TIMEOUT_SECONDS
 	CacheTTL    time.Duration // IDT_VALIDATE_CACHE_SECONDS; 0 = validate every request
@@ -139,6 +141,12 @@ func newIDTValidator(nc *nats.Conn, access *wire.AgentAccess, cfg IDTValidation,
 	if cfg.Subject == "" {
 		cfg.Subject = defaultIdentityBasePath + "." + defaultValidateSubject
 	}
+	if cfg.Enabled && access == nil {
+		// agent.New already refuses this configuration; guard here too so the
+		// invariant (authorize can always deref v.access) holds locally.
+		logger.Printf("IDT_METRIC event=validate.misconfig reason=missing_access")
+		access = &wire.AgentAccess{}
+	}
 	v := &idtValidator{cfg: cfg, access: access, nc: nc, logger: logger, cache: map[string]cacheEntry{}}
 	v.call = v.natsCall
 	return v
@@ -160,13 +168,30 @@ func (v *idtValidator) natsCall(req validateRequest) (validateResponse, error) {
 	return resp, nil
 }
 
-// idPrefix returns "IDT-<uuid>" from "IDT-<uuid>.<cipher>" — safe for logs
-// and cache keys; never log the cipher tail.
+// idPrefixLogMax caps the fallback (dotless) idPrefix so a malformed or
+// oversized header can't blow up log lines.
+const idPrefixLogMax = 40
+
+// idPrefix returns "IDT-<uuid>" from "IDT-<uuid>.<cipher>" — safe for LOGS
+// ONLY; never log the cipher tail. Not used for cache keys (see cacheKey):
+// the prefix alone does not authenticate the token, so caching on it would
+// let "IDT-<same-uuid>.<forged-cipher>" ride an existing allow.
 func idPrefix(idt string) string {
 	if i := strings.IndexByte(idt, '.'); i >= 0 {
 		return idt[:i]
 	}
+	if len(idt) > idPrefixLogMax {
+		return idt[:idPrefixLogMax]
+	}
 	return idt
+}
+
+// cacheKey authenticates on the full token (via its hash), never the
+// human-readable prefix alone, so a forged cipher tail sharing a cached
+// token's prefix cannot ride that cache entry.
+func cacheKey(idt, sessionID, appID, fnID string) string {
+	sum := sha256.Sum256([]byte(idt))
+	return hex.EncodeToString(sum[:]) + "|" + sessionID + "|" + appID + "|" + fnID
 }
 
 func forbidden(reason string) *nats_service.NatsServiceError {
@@ -184,7 +209,10 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 	}
 	appID, fnID := v.access.AppID, v.access.FunctionID
 	if idt == "" {
-		if v.cfg.ObserveOnly || v.cfg.FailOpen {
+		// FailOpen only covers identity being unreachable, never a missing
+		// token — a caller that sends no header at all must always be
+		// denied unless we're in observe-only (log, don't block).
+		if v.cfg.ObserveOnly {
 			v.logger.Printf("IDT_METRIC event=validate.pass_through reason=%s agent=%s function=%s observe=%v failOpen=%v",
 				reasonMissingIDT, appID, fnID, v.cfg.ObserveOnly, v.cfg.FailOpen)
 			return Identity{}, nil
@@ -193,7 +221,7 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 		return Identity{}, forbidden(reasonMissingIDT)
 	}
 
-	key := idPrefix(idt) + "|" + sessionID + "|" + appID + "|" + fnID
+	key := cacheKey(idt, sessionID, appID, fnID)
 	if v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
 		if e, ok := v.cache[key]; ok && time.Now().Before(e.expires) {
@@ -208,11 +236,11 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 	resp, err := v.call(validateRequest{IDT: idt, AgentID: appID, FunctionID: fnID})
 	if err != nil {
 		if v.cfg.ObserveOnly || v.cfg.FailOpen {
-			v.logger.Printf("IDT_METRIC event=validate.pass_through reason=%s agent=%s function=%s idtid=%s err=%q",
+			v.logger.Printf("IDT_METRIC event=validate.pass_through reason=%s agent=%s function=%s idtid=%q err=%q",
 				reasonValidateError, appID, fnID, idPrefix(idt), err.Error())
 			return Identity{IDT: idt}, nil
 		}
-		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%s err=%q",
+		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q err=%q",
 			reasonValidateError, appID, fnID, idPrefix(idt), err.Error())
 		return Identity{}, forbidden(reasonValidateError)
 	}
@@ -231,21 +259,24 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 	}
 	if reason != "" {
 		if v.cfg.ObserveOnly {
-			v.logger.Printf("IDT_METRIC event=validate.observe decision=deny reason=%s agent=%s function=%s idtid=%s user=%s",
+			v.logger.Printf("IDT_METRIC event=validate.observe decision=deny reason=%s agent=%s function=%s idtid=%q user=%s",
 				reason, appID, fnID, idPrefix(idt), resp.UserID)
 			return Identity{IDT: idt}, nil
 		}
-		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%s user=%s account=%s",
+		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q user=%s account=%s",
 			reason, appID, fnID, idPrefix(idt), resp.UserID, resp.AccountID)
 		return Identity{}, forbidden(reason)
 	}
 
 	id := Identity{UserID: resp.UserID, AccountID: resp.AccountID, Verified: !v.cfg.ObserveOnly, IDT: idt}
 	if v.cfg.ObserveOnly {
-		v.logger.Printf("IDT_METRIC event=validate.observe decision=allow agent=%s function=%s idtid=%s user=%s", appID, fnID, idPrefix(idt), resp.UserID)
-	} else {
-		v.logger.Printf("IDT_METRIC event=validate.allow agent=%s function=%s idtid=%s user=%s account=%s", appID, fnID, idPrefix(idt), resp.UserID, resp.AccountID)
+		v.logger.Printf("IDT_METRIC event=validate.observe decision=allow agent=%s function=%s idtid=%q user=%s", appID, fnID, idPrefix(idt), resp.UserID)
+		// Never cache in observe-only: caching an allow would silence the
+		// per-request observe log after the first hit, undercounting the
+		// rollout signal this mode exists to produce.
+		return id, nil
 	}
+	v.logger.Printf("IDT_METRIC event=validate.allow agent=%s function=%s idtid=%q user=%s account=%s", appID, fnID, idPrefix(idt), resp.UserID, resp.AccountID)
 	if v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
 		if len(v.cache) >= idtCacheMaxEntries {
