@@ -65,6 +65,12 @@ type Config struct {
 	Attachments      bool
 	Metadata         map[string]any
 
+	// Access registers this agent with the identity model (card "access").
+	// nil → read APP_ID / APP_FUNCTION_ID from the environment.
+	Access *wire.AgentAccess
+	// IDTValidation controls inbound token checks. nil → IDTValidationFromEnv().
+	IDTValidation *IDTValidation
+
 	// Optional NATS overrides (default: environment).
 	NATSURL string
 	NATSJWT string
@@ -81,6 +87,7 @@ type Agent struct {
 	sessions  SessionStore
 	extra     []nats_service.EndpointRegistration
 	startTime time.Time
+	idt       *idtValidator
 
 	mu   sync.Mutex
 	runs map[string]*run
@@ -112,6 +119,16 @@ func New(cfg Config) (*Agent, error) {
 	if len(cfg.OutputModalities) == 0 {
 		cfg.OutputModalities = []string{"text"}
 	}
+	if cfg.Access == nil {
+		cfg.Access = accessFromEnv()
+	}
+	if cfg.IDTValidation == nil {
+		v := IDTValidationFromEnv()
+		cfg.IDTValidation = &v
+	}
+	if cfg.IDTValidation.Enabled && (cfg.Access == nil || cfg.Access.AppID == "" || cfg.Access.FunctionID == "") {
+		return nil, fmt.Errorf("agent %q: IDT_VALIDATION=true requires Access.AppID and Access.FunctionID (env APP_ID / APP_FUNCTION_ID)", cfg.Name)
+	}
 
 	url := cfg.NATSURL
 	if url == "" {
@@ -141,11 +158,17 @@ func New(cfg Config) (*Agent, error) {
 		svc.SetRepositoryURL(cfg.RepositoryURL)
 	}
 
+	if cfg.IDTValidation.Enabled {
+		log.Printf("agent %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v cacheTTL=%s)",
+			cfg.Name, cfg.IDTValidation.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
+	}
+
 	return &Agent{
 		cfg:  cfg,
 		svc:  svc,
 		nc:   svc.GetNatsService(),
 		runs: map[string]*run{},
+		idt:  newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil),
 	}, nil
 }
 
@@ -194,6 +217,7 @@ func (a *Agent) Card() wire.AgentCard {
 		Version:         a.cfg.Version,
 		RepositoryURL:   a.cfg.RepositoryURL,
 		Tags:            a.cfg.Tags,
+		Access:          a.cfg.Access,
 		Capabilities: wire.Capabilities{
 			Streaming:   true,
 			Sync:        a.invoke != nil,
