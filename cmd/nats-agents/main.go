@@ -60,6 +60,8 @@ Flags:
                         turn prints its session id, and interactive mode
                         prints a resume command on exit
       --user ID         User id for session scoping (chat only)
+      --idt TOKEN       Internal Delegation Token sent as X-TRX-IDT on
+                        chat/run (default: $TRX_IDT)
       --version         Print version and exit
 
 Connection resolution — nats CLI contexts are first-class: with no options,
@@ -107,6 +109,7 @@ func main() {
 	fs.BoolVar(&cfg.asJSON, "json", false, "")
 	fs.StringVar(&cfg.session, "session", "", "")
 	fs.StringVar(&cfg.user, "user", "", "")
+	idt := fs.String("idt", os.Getenv("TRX_IDT"), "Internal Delegation Token to send as X-TRX-IDT (default $TRX_IDT)")
 	fs.BoolVar(&showVersion, "version", false, "")
 	_ = fs.Parse(os.Args[1:])
 
@@ -133,7 +136,7 @@ func main() {
 
 	ac := agentclient.NewFromConn(nc)
 	tc := toolclient.NewFromConn(nc)
-	ctx := context.Background()
+	ctx := agentclient.WithIDT(context.Background(), *idt)
 
 	switch cmd {
 	case "list":
