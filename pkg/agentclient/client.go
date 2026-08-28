@@ -180,14 +180,16 @@ func requestJSON[T any](ctx context.Context, c *Client, subject string, body any
 	return &out, nil
 }
 
-// Card fetches one agent's card directly.
+// Card fetches one agent's card directly. Unauthenticated by protocol: never
+// sends X-TRX-IDT, even if the caller's ctx carries one via WithIDT.
 func (c *Client) Card(ctx context.Context, agent string) (*wire.AgentCard, error) {
-	return requestJSON[wire.AgentCard](ctx, c, wire.AgentSubject(agent, "card"), struct{}{})
+	return requestJSON[wire.AgentCard](context.Background(), c, wire.AgentSubject(agent, "card"), struct{}{})
 }
 
-// Ping checks agent liveness.
+// Ping checks agent liveness. Unauthenticated by protocol: never sends
+// X-TRX-IDT, even if the caller's ctx carries one via WithIDT.
 func (c *Client) Ping(ctx context.Context, agent string) (*wire.PingResponse, error) {
-	return requestJSON[wire.PingResponse](ctx, c, wire.AgentSubject(agent, "ping"), struct{}{})
+	return requestJSON[wire.PingResponse](context.Background(), c, wire.AgentSubject(agent, "ping"), struct{}{})
 }
 
 // Run is one live chat turn: the ack plus the event stream. The Events

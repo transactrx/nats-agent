@@ -607,11 +607,18 @@ func startFakeIdentity(t *testing.T, subject string, grant map[string]string) *i
 	return &calls
 }
 
-func startSecuredAgent(t *testing.T, name, identitySubject string, observe bool) (*memSessionStore, *[]string) {
+// startSecuredAgent returns the session store and a race-safe getter for the
+// userIDs (and identity) the handlers observed, in call order.
+func startSecuredAgent(t *testing.T, name, identitySubject string, observe bool) (*memSessionStore, func() []string) {
 	t.Helper()
 	store := newMemSessionStore()
 	var seenUsers []string
 	var mu sync.Mutex
+	record := func(turn *agent.Turn) {
+		mu.Lock()
+		seenUsers = append(seenUsers, turn.UserID+"|"+fmt.Sprint(turn.Identity.Verified)+"|"+turn.Identity.IDT)
+		mu.Unlock()
+	}
 	a, err := agent.New(agent.Config{
 		Name:        name,
 		Description: "Secured agent for IDT tests.",
@@ -626,18 +633,27 @@ func startSecuredAgent(t *testing.T, name, identitySubject string, observe bool)
 	}
 	a.UseSessionStore(store)
 	a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
-		mu.Lock()
-		seenUsers = append(seenUsers, turn.UserID+"|"+fmt.Sprint(turn.Identity.Verified)+"|"+turn.Identity.IDT)
-		mu.Unlock()
+		record(turn)
 		stream.Text("ok")
 		stream.Done(wire.StopEndTurn, nil)
 		return nil
+	})
+	a.OnInvoke(func(ctx context.Context, turn *agent.Turn) (*wire.InvokeResponse, error) {
+		record(turn)
+		return &wire.InvokeResponse{Message: wire.Message{Role: "assistant", Content: []wire.ContentBlock{{Text: "ok"}}}}, nil
 	})
 	if err := a.Start(); err != nil {
 		t.Fatalf("agent.Start: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Shutdown() })
-	return store, &seenUsers
+	getSeen := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]string, len(seenUsers))
+		copy(out, seenUsers)
+		return out
+	}
+	return store, getSeen
 }
 
 func TestIDTChatAllowedDeniedMissing(t *testing.T) {
@@ -655,8 +671,8 @@ func TestIDTChatAllowedDeniedMissing(t *testing.T) {
 	}
 	for range run.Events {
 	}
-	if len(*seen) != 1 || (*seen)[0] != "alice|true|IDT-good.c" {
-		t.Fatalf("handler saw %v, want verified alice", *seen)
+	if got := seen(); len(got) != 1 || got[0] != "alice|true|IDT-good.c" {
+		t.Fatalf("handler saw %v, want verified alice", got)
 	}
 
 	// denied function → 403 before ack
@@ -676,8 +692,22 @@ func TestIDTChatAllowedDeniedMissing(t *testing.T) {
 	if err != nil || card.Access == nil || card.Access.FunctionID != "fnTest" {
 		t.Fatalf("card must be public with access: %+v %v", card, err)
 	}
-	if atomic.LoadInt32(calls) < 3 {
-		t.Fatalf("identity should have been consulted, calls=%d", *calls)
+	if got := atomic.LoadInt32(calls); got < 3 {
+		t.Fatalf("identity should have been consulted, calls=%d", got)
+	}
+}
+
+func TestIDTInvokeDenied(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{})
+	_, seen := startSecuredAgent(t, "securedInvoke", subj, false)
+	c := agentclient.NewFromConn(testConn(t))
+	msg := wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}
+
+	_, err := c.Invoke(agentclient.WithIDT(context.Background(), "IDT-bad.c"), "securedInvoke", wire.ChatRequest{Message: msg})
+	assertForbidden(t, err, "DENIED_FN")
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("denied invoke must never reach the handler: %v", got)
 	}
 }
 
@@ -699,6 +729,35 @@ func TestIDTSessionsGatedAndUserOverridden(t *testing.T) {
 	}
 	_, err = c.SessionsList(context.Background(), "securedSessions", "alice")
 	assertForbidden(t, err, "MISSING_IDT")
+
+	// The override applies on a non-list handler too: body says bob, but
+	// s-alice only exists under alice, and alice's token verifies.
+	getResp, err := c.SessionGet(agentclient.WithIDT(context.Background(), "IDT-good.c"), "securedSessions", "bob", "s-alice")
+	if err != nil {
+		t.Fatalf("sessionGet: %v", err)
+	}
+	if getResp.SessionID != "s-alice" || getResp.Title != "mine" {
+		t.Fatalf("verified identity must override body userId on Get too: %+v", getResp)
+	}
+}
+
+func TestIDTSessionDeleteDeniedPreservesSession(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{"IDT-good.c": "alice"})
+	store, _ := startSecuredAgent(t, "securedSessionDelete", subj, false)
+	store.put("alice", wire.SessionGetResponse{SessionID: "s-alice", Title: "mine"})
+	c := agentclient.NewFromConn(testConn(t))
+
+	_, err := c.SessionDelete(agentclient.WithIDT(context.Background(), "IDT-bad.c"), "securedSessionDelete", "alice", "s-alice")
+	assertForbidden(t, err, "DENIED_FN")
+
+	got, err := store.Get(context.Background(), "alice", "s-alice")
+	if err != nil {
+		t.Fatalf("denied delete must not touch the store: %v", err)
+	}
+	if got.SessionID != "s-alice" || got.Title != "mine" {
+		t.Fatalf("session was altered despite denied delete: %+v", got)
+	}
 }
 
 func TestIDTObserveOnlyPassesThrough(t *testing.T) {
@@ -712,8 +771,8 @@ func TestIDTObserveOnlyPassesThrough(t *testing.T) {
 	}
 	for range run.Events {
 	}
-	if len(*seen) != 1 || (*seen)[0] != "u|false|" {
-		t.Fatalf("observe-only must keep caller userId, unverified: %v", *seen)
+	if got := seen(); len(got) != 1 || got[0] != "u|false|" {
+		t.Fatalf("observe-only must keep caller userId, unverified: %v", got)
 	}
 }
 
@@ -722,6 +781,85 @@ func TestIDTMisconfigRejectedAtNew(t *testing.T) {
 		IDTValidation: &agent.IDTValidation{Enabled: true}})
 	if err == nil {
 		t.Fatal("IDT_VALIDATION without Access must fail agent.New")
+	}
+}
+
+// TestIDTChatDenyDoesNotPublishToStream proves a denied chat request never
+// causes any event to reach the caller-provided streamSubject: the deny
+// happens in parseTurn, before the ack (and before the stream even exists).
+func TestIDTChatDenyDoesNotPublishToStream(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{})
+	startSecuredAgent(t, "securedStreamDeny", subj, false)
+
+	nc := testConn(t)
+	streamSubj := "test.stream." + t.Name()
+	streamMsgs := make(chan *nats.Msg, 16)
+	sub, err := nc.ChanSubscribe(streamSubj, streamMsgs)
+	if err != nil {
+		t.Fatalf("subscribing to stream subject: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	c := agentclient.NewFromConn(testConn(t))
+	msg := wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}
+	_, err = c.Chat(agentclient.WithIDT(context.Background(), "IDT-bad.c"), "securedStreamDeny",
+		wire.ChatRequest{StreamSubject: streamSubj, Message: msg})
+	assertForbidden(t, err, "DENIED_FN")
+
+	select {
+	case m := <-streamMsgs:
+		t.Fatalf("denied chat must not publish to streamSubject, got: %s", string(m.Data))
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestIDTCardAndPingNeverSendHeader proves discover/card/ping stay
+// unauthenticated even when the caller's ctx carries an IDT: the client must
+// never attach X-TRX-IDT to those requests.
+func TestIDTCardAndPingNeverSendHeader(t *testing.T) {
+	subj := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subj, map[string]string{"IDT-good.c": "alice"})
+	startSecuredAgent(t, "cardPingNoHeader", subj, false)
+
+	nc := testConn(t)
+	cardMsgs := make(chan *nats.Msg, 4)
+	pingMsgs := make(chan *nats.Msg, 4)
+	subC, err := nc.ChanSubscribe(wire.AgentSubject("cardPingNoHeader", "card"), cardMsgs)
+	if err != nil {
+		t.Fatalf("subscribing to card subject: %v", err)
+	}
+	defer subC.Unsubscribe()
+	subP, err := nc.ChanSubscribe(wire.AgentSubject("cardPingNoHeader", "ping"), pingMsgs)
+	if err != nil {
+		t.Fatalf("subscribing to ping subject: %v", err)
+	}
+	defer subP.Unsubscribe()
+
+	c := agentclient.NewFromConn(testConn(t))
+	ctx := agentclient.WithIDT(context.Background(), "IDT-good.c")
+	if _, err := c.Card(ctx, "cardPingNoHeader"); err != nil {
+		t.Fatalf("card: %v", err)
+	}
+	if _, err := c.Ping(ctx, "cardPingNoHeader"); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	select {
+	case m := <-cardMsgs:
+		if m.Header.Get(wire.HeaderIDT) != "" {
+			t.Fatalf("card must never carry X-TRX-IDT, got %v", m.Header)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("card request was never observed")
+	}
+	select {
+	case m := <-pingMsgs:
+		if m.Header.Get(wire.HeaderIDT) != "" {
+			t.Fatalf("ping must never carry X-TRX-IDT, got %v", m.Header)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ping request was never observed")
 	}
 }
 

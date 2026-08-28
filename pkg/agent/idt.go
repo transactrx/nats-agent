@@ -39,6 +39,7 @@ const (
 	reasonMissingIDT        = "MISSING_IDT"
 	reasonValidateError     = "VALIDATE_ERROR"
 	reasonDeniedFn          = "DENIED_FN"
+	reasonInvalidIdentity   = "INVALID_IDENTITY"
 )
 
 // IDTValidationFromEnv reads the org env contract.
@@ -256,6 +257,11 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 		}
 	case !resp.FunctionGranted:
 		reason = reasonDeniedFn
+	case strings.TrimSpace(resp.UserID) == "":
+		// Valid and granted but identity didn't return a user id: a verified
+		// caller would otherwise silently overwrite a legitimate body userId
+		// with "". Treat as a deny in enforcing mode; observe-only just logs.
+		reason = reasonInvalidIdentity
 	}
 	if reason != "" {
 		if v.cfg.ObserveOnly {

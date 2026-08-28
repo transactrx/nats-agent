@@ -151,6 +151,38 @@ func TestAuthorizeIdentityErrorFailClosedThenOpen(t *testing.T) {
 	}
 }
 
+func TestAuthorizeGrantedButEmptyUserIDIsDenied(t *testing.T) {
+	calls := 0
+	v := fakeValidator(IDTValidation{Enabled: true, CacheTTL: time.Minute}, func(validateRequest) (validateResponse, error) {
+		calls++
+		return validateResponse{Valid: true, FunctionGranted: true, UserID: "  ", AccountID: "a1"}, nil
+	})
+	id, e := v.authorize("IDT-1.c", "s1")
+	if e == nil || e.Status != 403 || e.ErrorMessage != "INVALID_IDENTITY" {
+		t.Fatalf("want 403 INVALID_IDENTITY, got %+v %+v", id, e)
+	}
+	if id.Verified {
+		t.Fatalf("denied identity must not be verified: %+v", id)
+	}
+	// Must not be cached: a second call re-consults identity.
+	if _, e := v.authorize("IDT-1.c", "s1"); e == nil || e.ErrorMessage != "INVALID_IDENTITY" {
+		t.Fatalf("second call: want 403 INVALID_IDENTITY, got %+v", e)
+	}
+	if calls != 2 {
+		t.Fatalf("empty-userId deny must not be cached: calls=%d", calls)
+	}
+}
+
+func TestAuthorizeObserveOnlyEmptyUserIDPassesThroughUnverified(t *testing.T) {
+	v := fakeValidator(IDTValidation{Enabled: true, ObserveOnly: true}, func(validateRequest) (validateResponse, error) {
+		return validateResponse{Valid: true, FunctionGranted: true, UserID: "", AccountID: "a1"}, nil
+	})
+	id, e := v.authorize("IDT-1.c", "s1")
+	if e != nil || id.Verified {
+		t.Fatalf("observe-only must pass through unverified even with empty userId: %+v %v", id, e)
+	}
+}
+
 func TestAuthorizeObserveOnlyNeverBlocks(t *testing.T) {
 	reason := "DENIED_FN"
 	v := fakeValidator(IDTValidation{Enabled: true, ObserveOnly: true}, func(validateRequest) (validateResponse, error) {
