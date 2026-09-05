@@ -1,0 +1,27 @@
+name: Durable lifecycle experiment
+on:
+  pull_request:
+    paths:
+      - 'experiments/durable-session/**'
+      - '.github/workflows/durable-experiment.yml'
+  push:
+    branches: [Development]
+    paths:
+      - 'experiments/durable-session/**'
+      - '.github/workflows/durable-experiment.yml'
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: experiments/durable-session
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: experiments/durable-session/go.mod
+          cache-dependency-path: experiments/durable-session/go.sum
+      - run: go test -race -count=1 ./...
+      - run: go vet ./...
