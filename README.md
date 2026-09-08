@@ -165,3 +165,12 @@ later). `--session ID` resumes a session in one-shot mode too, and `--user ID`
 sets the user id sessions are scoped under. `--idt TOKEN` (default `$TRX_IDT`)
 sends the Internal Delegation Token as `X-TRX-IDT` on `chat` for agents with
 IDT validation enabled; `run` (network tool execution) does not use it.
+
+### Regional agent routes
+
+Set `agent.Config.Region` explicitly when an agent uses regional storage. The
+agent keeps its normal discovery identity and additionally serves the same
+authenticated handlers at `trx.agent.<name>_<region>.*`, with a queue isolated
+from other regions. Callers must retain the owning region across turns; these
+routes do not replicate data or fail over to another region. Regional and normal
+cancellation both reach the owning run. The option is off by default.

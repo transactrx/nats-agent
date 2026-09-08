@@ -56,7 +56,9 @@ type InvokeHandler func(ctx context.Context, turn *Turn) (*wire.InvokeResponse, 
 // else has sensible defaults. NATS connection settings fall back to the org
 // conventions: NATS_URL, NATS_JWT, NATS_KEY.
 type Config struct {
-	Name             string
+	Name string
+	// Region adds a separately queued regional alias without advertising a second agent.
+	Region           string
 	DisplayName      string
 	Description      string
 	Version          string
@@ -84,6 +86,7 @@ type Config struct {
 type Agent struct {
 	cfg       Config
 	svc       *nats_service.NatService
+	regional  *nats_service.NatService
 	nc        *nats.Conn
 	chat      ChatHandler
 	invoke    InvokeHandler
@@ -95,8 +98,9 @@ type Agent struct {
 	mu   sync.Mutex
 	runs map[string]*run
 
-	discoverSub *nats.Subscription
-	cancelSub   *nats.Subscription
+	discoverSub       *nats.Subscription
+	cancelSub         *nats.Subscription
+	regionalCancelSub *nats.Subscription
 }
 
 type run struct {
@@ -109,6 +113,9 @@ type run struct {
 func New(cfg Config) (*Agent, error) {
 	if !nameRe.MatchString(cfg.Name) {
 		return nil, fmt.Errorf("invalid agent name %q: must match %s", cfg.Name, nameRe)
+	}
+	if cfg.Region != "" && !nameRe.MatchString(cfg.Region) {
+		return nil, fmt.Errorf("invalid agent region %q", cfg.Region)
 	}
 	if reservedNames[cfg.Name] {
 		return nil, fmt.Errorf("agent name %q is reserved", cfg.Name)
@@ -169,6 +176,15 @@ func New(cfg Config) (*Agent, error) {
 		svc.SetRepositoryURL(cfg.RepositoryURL)
 	}
 
+	var regional *nats_service.NatService
+	if cfg.Region != "" {
+		alias := cfg.Name + "_" + cfg.Region
+		regional, err = nats_service.NewLowLevel(wire.AgentPrefix+"."+alias, "agent."+alias, url, jwt, key, 1024*2, 1024*300)
+		if err != nil {
+			return nil, fmt.Errorf("connecting regional agent: %w", err)
+		}
+		regional.SetDescription("Regional route for " + cfg.Name + " in " + cfg.Region)
+	}
 	idt := newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
 	if cfg.IDTValidation.Enabled {
 		// Log the validator's effective (defaulted) subject, not
@@ -178,11 +194,12 @@ func New(cfg Config) (*Agent, error) {
 	}
 
 	return &Agent{
-		cfg:  cfg,
-		svc:  svc,
-		nc:   svc.GetNatsService(),
-		runs: map[string]*run{},
-		idt:  idt,
+		cfg:      cfg,
+		svc:      svc,
+		regional: regional,
+		nc:       svc.GetNatsService(),
+		runs:     map[string]*run{},
+		idt:      idt,
 	}, nil
 }
 
@@ -311,6 +328,15 @@ func (a *Agent) Start() error {
 		return err
 	}
 
+	if a.regional != nil {
+		if err := a.regional.AddEndpointWithDocs(regs); err != nil {
+			return err
+		}
+		if err := a.regional.Start(); err != nil {
+			return err
+		}
+	}
+
 	// Common discovery: one reply per agent (queue group), card on match.
 	discoverSub, err := a.nc.QueueSubscribe(wire.AgentDiscoverSubject, "agent."+a.cfg.Name, func(msg *nats.Msg) {
 		if msg.Reply == "" {
@@ -335,7 +361,7 @@ func (a *Agent) Start() error {
 	a.discoverSub = discoverSub
 
 	// Cancel broadcast: every instance listens; only the run owner replies.
-	cancelSub, err := a.nc.Subscribe(wire.AgentSubject(a.cfg.Name, "cancel"), func(msg *nats.Msg) {
+	cancelHandler := func(msg *nats.Msg) {
 		var req wire.CancelRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil || req.RunID == "" {
 			return
@@ -351,11 +377,18 @@ func (a *Agent) Start() error {
 			data, _ := json.Marshal(wire.CancelResponse{Cancelled: true})
 			_ = a.nc.Publish(msg.Reply, data)
 		}
-	})
+	}
+	cancelSub, err := a.nc.Subscribe(wire.AgentSubject(a.cfg.Name, "cancel"), cancelHandler)
 	if err != nil {
 		return fmt.Errorf("subscribing to cancel broadcast: %w", err)
 	}
 	a.cancelSub = cancelSub
+	if a.regional != nil {
+		a.regionalCancelSub, err = a.nc.Subscribe(wire.AgentSubject(a.cfg.Name+"_"+a.cfg.Region, "cancel"), cancelHandler)
+		if err != nil {
+			return err
+		}
+	}
 
 	if err := a.svc.Start(); err != nil {
 		return err
@@ -367,8 +400,14 @@ func (a *Agent) Start() error {
 // Shutdown drains subscriptions. In-flight runs keep their contexts until
 // the process exits.
 func (a *Agent) Shutdown() error {
+	if a.regional != nil {
+		_ = a.regional.Shutdown()
+	}
 	if a.discoverSub != nil {
 		_ = a.discoverSub.Drain()
+	}
+	if a.regionalCancelSub != nil {
+		_ = a.regionalCancelSub.Drain()
 	}
 	if a.cancelSub != nil {
 		_ = a.cancelSub.Drain()
