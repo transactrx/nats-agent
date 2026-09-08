@@ -37,6 +37,9 @@ type Turn struct {
 	wire.ChatRequest
 	RunID  string
 	Logger *log.Logger
+	// Identity is the runtime's verdict on the caller (see IDTValidation).
+	// When Identity.Verified, UserID has been replaced by the verified id.
+	Identity Identity
 }
 
 // ChatHandler runs one streaming chat turn. Emit events through the stream;
@@ -53,7 +56,9 @@ type InvokeHandler func(ctx context.Context, turn *Turn) (*wire.InvokeResponse, 
 // else has sensible defaults. NATS connection settings fall back to the org
 // conventions: NATS_URL, NATS_JWT, NATS_KEY.
 type Config struct {
-	Name             string
+	Name string
+	// Region adds a separately queued regional alias without advertising a second agent.
+	Region           string
 	DisplayName      string
 	Description      string
 	Version          string
@@ -65,6 +70,12 @@ type Config struct {
 	Attachments      bool
 	Metadata         map[string]any
 
+	// Access registers this agent with the identity model (card "access").
+	// nil → read APP_ID / APP_FUNCTION_ID from the environment.
+	Access *wire.AgentAccess
+	// IDTValidation controls inbound token checks. nil → IDTValidationFromEnv().
+	IDTValidation *IDTValidation
+
 	// Optional NATS overrides (default: environment).
 	NATSURL string
 	NATSJWT string
@@ -75,18 +86,21 @@ type Config struct {
 type Agent struct {
 	cfg       Config
 	svc       *nats_service.NatService
+	regional  *nats_service.NatService
 	nc        *nats.Conn
 	chat      ChatHandler
 	invoke    InvokeHandler
 	sessions  SessionStore
 	extra     []nats_service.EndpointRegistration
 	startTime time.Time
+	idt       *idtValidator
 
 	mu   sync.Mutex
 	runs map[string]*run
 
-	discoverSub *nats.Subscription
-	cancelSub   *nats.Subscription
+	discoverSub       *nats.Subscription
+	cancelSub         *nats.Subscription
+	regionalCancelSub *nats.Subscription
 }
 
 type run struct {
@@ -100,6 +114,9 @@ func New(cfg Config) (*Agent, error) {
 	if !nameRe.MatchString(cfg.Name) {
 		return nil, fmt.Errorf("invalid agent name %q: must match %s", cfg.Name, nameRe)
 	}
+	if cfg.Region != "" && !nameRe.MatchString(cfg.Region) {
+		return nil, fmt.Errorf("invalid agent region %q", cfg.Region)
+	}
 	if reservedNames[cfg.Name] {
 		return nil, fmt.Errorf("agent name %q is reserved", cfg.Name)
 	}
@@ -111,6 +128,24 @@ func New(cfg Config) (*Agent, error) {
 	}
 	if len(cfg.OutputModalities) == 0 {
 		cfg.OutputModalities = []string{"text"}
+	}
+	if cfg.Access == nil {
+		cfg.Access = accessFromEnv()
+	}
+	// A caller-supplied Access must be complete regardless of whether IDT
+	// validation is enabled: a partial Access still ends up on the public
+	// card, and downstream identity checks treat an empty functionId as
+	// BAD_REQUEST for every caller.
+	if cfg.Access != nil && (cfg.Access.AppID == "" || cfg.Access.FunctionID == "") {
+		return nil, fmt.Errorf("agent %q: Access requires both AppID and FunctionID (got appId=%q functionId=%q)",
+			cfg.Name, cfg.Access.AppID, cfg.Access.FunctionID)
+	}
+	if cfg.IDTValidation == nil {
+		v := IDTValidationFromEnv()
+		cfg.IDTValidation = &v
+	}
+	if cfg.IDTValidation.Enabled && (cfg.Access == nil || cfg.Access.AppID == "" || cfg.Access.FunctionID == "") {
+		return nil, fmt.Errorf("agent %q: IDT_VALIDATION=true requires Access.AppID and Access.FunctionID (env APP_ID / APP_FUNCTION_ID)", cfg.Name)
 	}
 
 	url := cfg.NATSURL
@@ -141,11 +176,30 @@ func New(cfg Config) (*Agent, error) {
 		svc.SetRepositoryURL(cfg.RepositoryURL)
 	}
 
+	var regional *nats_service.NatService
+	if cfg.Region != "" {
+		alias := cfg.Name + "_" + cfg.Region
+		regional, err = nats_service.NewLowLevel(wire.AgentPrefix+"."+alias, "agent."+alias, url, jwt, key, 1024*2, 1024*300)
+		if err != nil {
+			return nil, fmt.Errorf("connecting regional agent: %w", err)
+		}
+		regional.SetDescription("Regional route for " + cfg.Name + " in " + cfg.Region)
+	}
+	idt := newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
+	if cfg.IDTValidation.Enabled {
+		// Log the validator's effective (defaulted) subject, not
+		// cfg.IDTValidation.Subject, which may still be "" here.
+		log.Printf("agent %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v cacheTTL=%s)",
+			cfg.Name, idt.cfg.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
+	}
+
 	return &Agent{
-		cfg:  cfg,
-		svc:  svc,
-		nc:   svc.GetNatsService(),
-		runs: map[string]*run{},
+		cfg:      cfg,
+		svc:      svc,
+		regional: regional,
+		nc:       svc.GetNatsService(),
+		runs:     map[string]*run{},
+		idt:      idt,
 	}, nil
 }
 
@@ -173,6 +227,14 @@ func (a *Agent) AddEndpoint(reg nats_service.EndpointRegistration) error {
 // sharing the connection).
 func (a *Agent) Conn() *nats.Conn { return a.nc }
 
+// Authorize checks msg's X-TRX-IDT header against this agent's configured
+// access function. Use from AddEndpoint handlers that expose user data;
+// returns the 403 envelope to hand back on deny. Built-in chat/invoke/
+// sessions endpoints call this automatically.
+func (a *Agent) Authorize(msg *nats_service.NatsMessage, sessionID string) (Identity, *nats_service.NatsServiceError) {
+	return a.idt.authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
+}
+
 // Card builds the agent card from the config and wired capabilities.
 func (a *Agent) Card() wire.AgentCard {
 	endpoints := []string{"card", "ping", "chat", "cancel"}
@@ -194,6 +256,7 @@ func (a *Agent) Card() wire.AgentCard {
 		Version:         a.cfg.Version,
 		RepositoryURL:   a.cfg.RepositoryURL,
 		Tags:            a.cfg.Tags,
+		Access:          a.cfg.Access,
 		Capabilities: wire.Capabilities{
 			Streaming:   true,
 			Sync:        a.invoke != nil,
@@ -265,6 +328,15 @@ func (a *Agent) Start() error {
 		return err
 	}
 
+	if a.regional != nil {
+		if err := a.regional.AddEndpointWithDocs(regs); err != nil {
+			return err
+		}
+		if err := a.regional.Start(); err != nil {
+			return err
+		}
+	}
+
 	// Common discovery: one reply per agent (queue group), card on match.
 	discoverSub, err := a.nc.QueueSubscribe(wire.AgentDiscoverSubject, "agent."+a.cfg.Name, func(msg *nats.Msg) {
 		if msg.Reply == "" {
@@ -289,7 +361,7 @@ func (a *Agent) Start() error {
 	a.discoverSub = discoverSub
 
 	// Cancel broadcast: every instance listens; only the run owner replies.
-	cancelSub, err := a.nc.Subscribe(wire.AgentSubject(a.cfg.Name, "cancel"), func(msg *nats.Msg) {
+	cancelHandler := func(msg *nats.Msg) {
 		var req wire.CancelRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil || req.RunID == "" {
 			return
@@ -305,14 +377,31 @@ func (a *Agent) Start() error {
 			data, _ := json.Marshal(wire.CancelResponse{Cancelled: true})
 			_ = a.nc.Publish(msg.Reply, data)
 		}
-	})
+	}
+	cancelSub, err := a.nc.Subscribe(wire.AgentSubject(a.cfg.Name, "cancel"), cancelHandler)
 	if err != nil {
 		return fmt.Errorf("subscribing to cancel broadcast: %w", err)
 	}
 	a.cancelSub = cancelSub
+	if a.regional != nil {
+		a.regionalCancelSub, err = a.nc.Subscribe(wire.AgentSubject(a.cfg.Name+"_"+a.cfg.Region, "cancel"), cancelHandler)
+		if err != nil {
+			return err
+		}
+	}
 
 	if err := a.svc.Start(); err != nil {
 		return err
+	}
+	// Start returns only after both subscription sets are registered. Callers
+	// may immediately issue requests from another connection.
+	if err := a.nc.FlushTimeout(5 * time.Second); err != nil {
+		return err
+	}
+	if a.regional != nil {
+		if err := a.regional.GetNatsService().FlushTimeout(5 * time.Second); err != nil {
+			return err
+		}
 	}
 	log.Printf("agent %q serving on %s.> (instance %s)", a.cfg.Name, wire.AgentPrefix+"."+a.cfg.Name, a.svc.GetInstanceId())
 	return nil
@@ -321,8 +410,14 @@ func (a *Agent) Start() error {
 // Shutdown drains subscriptions. In-flight runs keep their contexts until
 // the process exits.
 func (a *Agent) Shutdown() error {
+	if a.regional != nil {
+		_ = a.regional.Shutdown()
+	}
 	if a.discoverSub != nil {
 		_ = a.discoverSub.Drain()
+	}
+	if a.regionalCancelSub != nil {
+		_ = a.regionalCancelSub.Drain()
 	}
 	if a.cancelSub != nil {
 		_ = a.cancelSub.Drain()
@@ -372,10 +467,18 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	if req.SessionID == "" {
 		req.SessionID = uuid.New().String()
 	}
+	id, aerr := a.Authorize(msg, req.SessionID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if id.Verified {
+		req.UserID = id.UserID
+	}
 	return &Turn{
 		ChatRequest: req,
 		RunID:       "run_" + uuid.New().String(),
 		Logger:      msg.Logger,
+		Identity:    id,
 	}, nil
 }
 

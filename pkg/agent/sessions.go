@@ -64,6 +64,19 @@ func (a *Agent) sessionRegistrations() []nats_service.EndpointRegistration {
 	}
 }
 
+// authorizeSession applies IDT enforcement to a sessions endpoint. sessionID
+// may be "" (list). On a verified identity the body's userId is replaced.
+func (a *Agent) authorizeSession(msg *nats_service.NatsMessage, userID *string, sessionID string) *nats_service.NatsServiceError {
+	id, aerr := a.Authorize(msg, sessionID)
+	if aerr != nil {
+		return aerr
+	}
+	if id.Verified {
+		*userID = id.UserID
+	}
+	return nil
+}
+
 func sessionError(err error) *nats_service.NatsServiceError {
 	if errors.Is(err, ErrSessionNotFound) {
 		return &nats_service.NatsServiceError{
@@ -109,6 +122,9 @@ func (a *Agent) handleSessionsList(msg *nats_service.NatsMessage) *nats_service.
 	if verr != nil {
 		return verr
 	}
+	if aerr := a.authorizeSession(msg, &req.UserID, ""); aerr != nil {
+		return aerr
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
 	sessions, err := a.sessions.List(ctx, req.UserID)
@@ -133,6 +149,9 @@ func (a *Agent) handleSessionsGet(msg *nats_service.NatsMessage) *nats_service.N
 	})
 	if verr != nil {
 		return verr
+	}
+	if aerr := a.authorizeSession(msg, &req.UserID, req.SessionID); aerr != nil {
+		return aerr
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
@@ -159,6 +178,9 @@ func (a *Agent) handleSessionsDelete(msg *nats_service.NatsMessage) *nats_servic
 	if verr != nil {
 		return verr
 	}
+	if aerr := a.authorizeSession(msg, &req.UserID, req.SessionID); aerr != nil {
+		return aerr
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
 	if err := a.sessions.Delete(ctx, req.UserID, req.SessionID); err != nil {
@@ -183,6 +205,9 @@ func (a *Agent) handleSessionsRename(msg *nats_service.NatsMessage) *nats_servic
 	if verr != nil {
 		return verr
 	}
+	if aerr := a.authorizeSession(msg, &req.UserID, req.SessionID); aerr != nil {
+		return aerr
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
 	if err := a.sessions.Rename(ctx, req.UserID, req.SessionID, req.Title); err != nil {
@@ -203,6 +228,9 @@ func (a *Agent) handleSessionsSetFavorite(msg *nats_service.NatsMessage) *nats_s
 	})
 	if verr != nil {
 		return verr
+	}
+	if aerr := a.authorizeSession(msg, &req.UserID, req.SessionID); aerr != nil {
+		return aerr
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()

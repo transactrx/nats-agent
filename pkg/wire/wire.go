@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.0"
+const ProtocolVersion = "1.1"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -19,6 +19,11 @@ const (
 	ToolDiscoverSubject  = ToolPrefix + ".discover"
 	ToolAnnounceSubject  = ToolPrefix + ".announce"
 )
+
+// HeaderIDT is the NATS message header carrying the caller's Internal
+// Delegation Token on chat/invoke/sessions requests (SPEC §5.1). Same name
+// trx-gofiber-session uses on the webapp→agent hop.
+const HeaderIDT = "X-TRX-IDT"
 
 // Card kinds, so a mixed consumer (e.g. a universal UI) can browse agents and
 // tools through the same machinery.
@@ -102,6 +107,11 @@ type AgentCard struct {
 	Skills           []Skill        `json:"skills,omitempty"`
 	Endpoints        []string       `json:"endpoints,omitempty"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
+
+	// Access is the agent's identity registration: the application id and
+	// the single RBAC function a user must hold to talk to this agent
+	// (SPEC §4.2, IDENTITY-AND-AUTHORITY §2.1). Absent = undeclared.
+	Access *AgentAccess `json:"access,omitempty"`
 }
 
 type Capabilities struct {
@@ -109,6 +119,13 @@ type Capabilities struct {
 	Sync        bool `json:"sync"`
 	Sessions    bool `json:"sessions"`
 	Attachments bool `json:"attachments"`
+}
+
+// AgentAccess maps an agent onto the identity model: an agent IS an
+// application (appId) exposing one access function (functionId).
+type AgentAccess struct {
+	AppID      string `json:"appId"`
+	FunctionID string `json:"functionId"`
 }
 
 type Skill struct {
@@ -327,6 +344,7 @@ type ToolRunResponse struct {
 const (
 	CodeInvalidBody    = 4001
 	CodeMissingField   = 4002
+	CodeForbidden      = 4031
 	CodeUnknownSession = 4041
 	CodeUnknownRun     = 4042
 	CodeBusy           = 4291

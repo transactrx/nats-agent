@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.0 (draft)
+# NATS Agent Protocol — Specification v1.1 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -108,6 +108,8 @@ Rules:
   `agent.<name>` so exactly **one instance per agent** replies.
 - Agents MAY register additional endpoints in their own space; discovery of
   those goes through the agent card (`endpoints` field) and `nats-discover`.
+  Agent-specific extension endpoints are unauthenticated unless the agent
+  calls the library's `Authorize` helper (Go: `(*agent.Agent).Authorize`).
 
 ## 4. Discovery
 
@@ -157,6 +159,7 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
     }
   ],
   "endpoints": ["chat", "cancel", "card", "ping", "sessionsList", "sessionsGet", "sessionsDelete"],
+  "access": { "appId": "copayassistanceAppId", "functionId": "copayassistanceFnId" },
   "metadata": {}
 }
 ```
@@ -165,6 +168,11 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
 - `version` is the agent's own release version.
 - `capabilities` gates the optional endpoint groups in §3. `streaming` MUST be
   true in v1 (chat is the core protocol); `sync` advertises `invoke`.
+- `access` (optional, v1.1) registers the agent with the identity model — an
+  agent is an application (`appId`) exposing one access function
+  (`functionId`); a caller may use the agent iff the user behind their token
+  holds that function. Absent = undeclared; UIs treat undeclared agents as
+  inaccessible when enforcing.
 - `metadata` is a free-form object for org-specific additions.
 
 ### 4.3 Ping
@@ -200,6 +208,15 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
 - `streamSubject` required. Caller MUST be subscribed before sending.
 - `userId` optional but recommended; agents that persist sessions key on it.
 - `metadata` free-form, passed to the agent handler (auth hints, tenant, …).
+
+**Authentication (v1.1):** requests to `chat`, `invoke`, `sessions*` carry the
+caller's Internal Delegation Token in NATS header `X-TRX-IDT`. An agent with
+validation enabled verifies it with identity
+(`validateInternalToken {idt, agentId=access.appId, functionId=access.functionId}`)
+before acking; on failure the reply is the error envelope with status 403 /
+code 4031 and nothing is published to `streamSubject`. When verified,
+`userId` is derived from the token and the body's value is ignored.
+`discover`, `card`, `ping`, `cancel` are unauthenticated.
 
 ### 5.2 Ack (the request's reply)
 
@@ -406,6 +423,7 @@ Same envelope as every transactrx service (`nats-service`
 |---|---|
 | 4001 | Invalid body (JSON unmarshal failed) |
 | 4002 | Missing required field |
+| 4031 | Forbidden — IDT missing, invalid, or function not granted (message = reason: MISSING_IDT, DENIED_FN, TOKEN_REVOKED, SESSION_EXPIRED, TOKEN_NOT_FOUND, VALIDATE_ERROR, INVALID_IDENTITY, INVALID_IDT) |
 | 4041 | Unknown session |
 | 4042 | Unknown run (cancel) |
 | 4291 | Agent busy / at capacity |
@@ -428,6 +446,16 @@ Same envelope as every transactrx service (`nats-service`
   groups, and optional session endpoints (by providing a `SessionStore`
   implementation) for free. Env conventions unchanged: `NATS_URL`,
   `NATS_QUEUE_NAME`, `NATS_JWT`, `NATS_KEY`.
+- **IDT enforcement** (Go library): `agent.Config.Access` sets the card's
+  `access` (default: read from `APP_ID` / `APP_FUNCTION_ID`);
+  `agent.Config.IDTValidation` controls inbound checks (default:
+  `IDTValidationFromEnv()`, reading `IDT_VALIDATION`, `IDT_OBSERVE_ONLY`,
+  `IDT_FAIL_OPEN`, `NATS_IDENTITY_BASE_PATH`,
+  `NATS_IDENTITY_VALIDATE_SUBJECT`, `IDT_VALIDATE_TIMEOUT_SECONDS`,
+  `IDT_VALIDATE_CACHE_SECONDS`, default cache 300s, keyed per session on
+  sha256(full token)+session+app+function; denies and observe-only results
+  are never cached). Callers set the outbound header with
+  `agentclient.WithIDT(ctx, idt)`.
 - **First implementor**: the copay chat application. `copayprogramsapi`'s
   assistant becomes agent `copayAssistant`; the `copayAssistance` SSE bridge
   switches to the agent client, hardcoded to `copayAssistant` until the
