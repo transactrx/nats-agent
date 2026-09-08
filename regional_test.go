@@ -97,3 +97,31 @@ func TestRegionalRoutesKeepSessionsAndTurnsInTheirRegion(t *testing.T) {
 		t.Fatalf("logical agent count: %d", count)
 	}
 }
+
+func TestRegionalRoutesEnforceIdentity(t *testing.T) {
+	subject := "test.identity.validate." + t.Name()
+	startFakeIdentity(t, subject, map[string]string{"IDT-good.c": "alice"})
+	store := newMemSessionStore()
+	store.put("alice", wire.SessionGetResponse{SessionID: "alice-session"})
+	a, err := agent.New(agent.Config{Name: "regionalAuth", Region: "east", Description: "secured regional route", NATSURL: testURL, Access: &wire.AgentAccess{AppID: "appTest", FunctionID: "fnTest"}, IDTValidation: &agent.IDTValidation{Enabled: true, Subject: subject, CacheTTL: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.UseSessionStore(store)
+	a.OnChat(func(context.Context, *agent.Turn, *agent.Stream) error { return nil })
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+	client := agentclient.NewFromConn(testConn(t))
+	_, err = client.SessionGet(context.Background(), "regionalAuth_east", "alice", "alice-session")
+	assertForbidden(t, err, "MISSING_IDT")
+	_, err = client.SessionGet(agentclient.WithIDT(context.Background(), "IDT-bad.c"), "regionalAuth_east", "alice", "alice-session")
+	assertForbidden(t, err, "DENIED_FN")
+	got, err := client.SessionGet(agentclient.WithIDT(context.Background(), "IDT-good.c"), "regionalAuth_east", "forged-user", "alice-session")
+	if err != nil || got.SessionID != "alice-session" {
+		t.Fatal("verified user did not replace caller identity", err)
+	}
+	_, err = client.Chat(context.Background(), "regionalAuth_east", wire.ChatRequest{Message: wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "denied"}}}})
+	assertForbidden(t, err, "MISSING_IDT")
+}

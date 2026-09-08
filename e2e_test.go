@@ -605,6 +605,9 @@ func startFakeIdentity(t *testing.T, subject string, grant map[string]string) *i
 		t.Fatalf("fake identity subscribe: %v", err)
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := nc.FlushTimeout(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	return &calls
 }
 

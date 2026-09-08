@@ -393,6 +393,16 @@ func (a *Agent) Start() error {
 	if err := a.svc.Start(); err != nil {
 		return err
 	}
+	// Start returns only after both subscription sets are registered. Callers
+	// may immediately issue requests from another connection.
+	if err := a.nc.FlushTimeout(5 * time.Second); err != nil {
+		return err
+	}
+	if a.regional != nil {
+		if err := a.regional.GetNatsService().FlushTimeout(5 * time.Second); err != nil {
+			return err
+		}
+	}
 	log.Printf("agent %q serving on %s.> (instance %s)", a.cfg.Name, wire.AgentPrefix+"."+a.cfg.Name, a.svc.GetInstanceId())
 	return nil
 }
