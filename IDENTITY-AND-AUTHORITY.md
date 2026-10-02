@@ -184,7 +184,10 @@ calls outside the agent's declared functions. Teams should not hand-roll this;
 if correct enforcement is optional, it will be optional.
 
 **Implemented:** card `access` = registration; enforcement in
-`pkg/agent/idt.go`.
+`pkg/idt` (shared by agents and, since protocol 1.2, tool hosts: a tool card
+may declare `access`, and `trx.tool.<name>.run` then requires a verified
+`X-TRX-IDT`). Tool runs forward the caller's own token for now — an interim
+exception to §4 until downscoped delegation exists.
 
 ---
 

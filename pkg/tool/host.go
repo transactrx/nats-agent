@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
+	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -29,6 +30,28 @@ type Tool interface {
 	Run(ctx context.Context, input map[string]any) (string, error)
 }
 
+// Call is everything the host knows about one run request (v1.2).
+type Call struct {
+	ToolUseID string
+	SessionID string
+	Agent     string
+	Input     map[string]any
+	Metadata  map[string]any
+	// Identity is the host's verdict on the caller. When Identity.Verified,
+	// UserID came from the token; otherwise it is the caller's assertion.
+	Identity idt.Identity
+}
+
+// CallTool is an optional extension of Tool. A tool implementing it
+// receives the full request (caller identity, session, correlation id) and
+// may return structured content; the host then calls RunCall instead of Run.
+// The run context also carries the caller's token (idt.TokenFromContext) so
+// the tool can forward it on onward authenticated calls.
+type CallTool interface {
+	Tool
+	RunCall(ctx context.Context, call Call) ([]wire.ToolResultContent, error)
+}
+
 // Info carries the deployment metadata a Tool implementation doesn't know
 // about itself. All fields are optional.
 type Info struct {
@@ -38,6 +61,12 @@ type Info struct {
 	Tags           []string
 	TimeoutSeconds int // advisory worst-case runtime; default 30
 	Metadata       map[string]any
+	// Access registers the tool with the identity model (card "access").
+	// Required when the host validates tokens.
+	Access *wire.AgentAccess
+	// MaxConcurrent bounds simultaneous runs of this tool per host process;
+	// excess requests get 429/4291. 0 = unbounded.
+	MaxConcurrent int
 }
 
 const defaultTimeoutSeconds = 30
@@ -53,6 +82,8 @@ type hostedTool struct {
 	nc          *nats.Conn
 	discoverSub *nats.Subscription
 	startTime   time.Time
+	validator   *idt.Validator
+	slots       chan struct{}
 }
 
 // Host serves registered tools over NATS.
@@ -60,21 +91,35 @@ type Host struct {
 	url, jwt, key string
 	tools         map[string]*hostedTool
 	started       bool
+	validation    idt.Validation
 }
 
-// NewHost reads the org NATS env conventions (NATS_URL, NATS_JWT, NATS_KEY).
+// NewHost reads the org NATS env conventions (NATS_URL, NATS_JWT, NATS_KEY)
+// and the IDT validation env contract (idt.ValidationFromEnv).
 func NewHost() (*Host, error) {
 	url := os.Getenv("NATS_URL")
 	if url == "" {
 		return nil, fmt.Errorf("NATS_URL is not set")
 	}
-	return NewHostWithNATS(url, os.Getenv("NATS_JWT"), os.Getenv("NATS_KEY")), nil
+	h := NewHostWithNATS(url, os.Getenv("NATS_JWT"), os.Getenv("NATS_KEY"))
+	h.validation = idt.ValidationFromEnv()
+	return h, nil
 }
 
 // NewHostWithNATS uses explicit connection settings (tests, special
-// deployments).
+// deployments). Token validation is off until SetIDTValidation.
 func NewHostWithNATS(url, jwt, key string) *Host {
 	return &Host{url: url, jwt: jwt, key: key, tools: map[string]*hostedTool{}}
+}
+
+// SetIDTValidation configures inbound token checks on every tool's run
+// endpoint (SPEC §8.4). Must be called before Start.
+func (h *Host) SetIDTValidation(v idt.Validation) error {
+	if h.started {
+		return fmt.Errorf("host already started")
+	}
+	h.validation = v
+	return nil
 }
 
 // Register adds a tool to the host. info may be nil. Must be called before
@@ -100,6 +145,12 @@ func (h *Host) Register(t Tool, info *Info) error {
 	if i.TimeoutSeconds <= 0 {
 		i.TimeoutSeconds = defaultTimeoutSeconds
 	}
+	if i.Access != nil && (i.Access.AppID == "" || i.Access.FunctionID == "") {
+		return fmt.Errorf("tool %q: Access requires both AppID and FunctionID", name)
+	}
+	if i.MaxConcurrent < 0 {
+		return fmt.Errorf("tool %q: MaxConcurrent must not be negative", name)
+	}
 	h.tools[name] = &hostedTool{
 		tool: t,
 		info: i,
@@ -114,6 +165,7 @@ func (h *Host) Register(t Tool, info *Info) error {
 			Tags:            i.Tags,
 			InputSchema:     t.InputSchema(),
 			TimeoutSeconds:  i.TimeoutSeconds,
+			Access:          i.Access,
 			Metadata:        i.Metadata,
 		},
 	}
@@ -135,6 +187,13 @@ func (h *Host) Start() error {
 	if len(h.tools) == 0 {
 		return fmt.Errorf("no tools registered")
 	}
+	if h.validation.Enabled {
+		for name, ht := range h.tools {
+			if ht.card.Access == nil {
+				return fmt.Errorf("tool %q: IDT validation requires Info.Access (appId + functionId)", name)
+			}
+		}
+	}
 	h.started = true
 
 	for name, ht := range h.tools {
@@ -152,6 +211,14 @@ func (h *Host) Start() error {
 		ht.svc = svc
 		ht.nc = svc.GetNatsService()
 		ht.startTime = time.Now()
+		ht.validator = idt.NewValidator(ht.nc, ht.card.Access, h.validation, nil)
+		if ht.info.MaxConcurrent > 0 {
+			ht.slots = make(chan struct{}, ht.info.MaxConcurrent)
+		}
+		if h.validation.Enabled {
+			log.Printf("tool %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v)",
+				name, ht.validator.Config().Subject, ht.card.Access.AppID, ht.card.Access.FunctionID, h.validation.ObserveOnly, h.validation.FailOpen)
+		}
 
 		regs := []nats_service.EndpointRegistration{
 			{
@@ -168,7 +235,7 @@ func (h *Host) Start() error {
 			},
 			{
 				Path:        "run",
-				Description: "Execute the tool. Request: {toolUseId?, input, userId?, agent?, metadata?}. Execution errors return status:\"error\" in a 200 reply (model-visible data).",
+				Description: "Execute the tool. Request: {toolUseId?, input, userId?, sessionId?, agent?, metadata?}; header X-TRX-IDT when the card declares access. Execution errors return status:\"error\" in a 200 reply (model-visible data).",
 				Response:    &nats_service.ResponseDoc{Description: "ToolRunResponse", ContentType: "application/json"},
 				Handler:     ht.handleRun,
 			},
@@ -257,11 +324,46 @@ func (ht *hostedTool) handleRun(msg *nats_service.NatsMessage) *nats_service.Nat
 		req.Input = map[string]any{}
 	}
 
+	// Authenticate before doing any work (SPEC §8.4). The decision cache is
+	// partitioned by session, like an agent's.
+	id, denied := ht.validator.Authorize(msg.Header.Get(wire.HeaderIDT), req.SessionID)
+	if denied != nil {
+		return denied
+	}
+	if id.Verified {
+		req.UserID = id.UserID
+	}
+
+	if ht.slots != nil {
+		select {
+		case ht.slots <- struct{}{}:
+			defer func() { <-ht.slots }()
+		default:
+			return &nats_service.NatsServiceError{Status: 429, ErrorMessage: "tool is at capacity", ApiStatusCode: wire.CodeBusy}
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ht.card.TimeoutSeconds)*time.Second)
 	defer cancel()
+	ctx = idt.WithToken(ctx, id.IDT)
 
 	start := time.Now()
-	result, err := ht.tool.Run(ctx, req.Input)
+	var content []wire.ToolResultContent
+	var err error
+	if ct, ok := ht.tool.(CallTool); ok {
+		content, err = ct.RunCall(ctx, Call{
+			ToolUseID: req.ToolUseID,
+			SessionID: req.SessionID,
+			Agent:     req.Agent,
+			Input:     req.Input,
+			Metadata:  req.Metadata,
+			Identity:  id,
+		})
+	} else {
+		var result string
+		result, err = ht.tool.Run(ctx, req.Input)
+		content = []wire.ToolResultContent{{Text: result}}
+	}
 	resp := wire.ToolRunResponse{
 		ToolUseID: req.ToolUseID,
 		LatencyMs: time.Since(start).Milliseconds(),
@@ -273,7 +375,7 @@ func (ht *hostedTool) handleRun(msg *nats_service.NatsMessage) *nats_service.Nat
 		msg.Logger.Printf("tool %s run failed (user=%s agent=%s): %v", ht.card.Name, req.UserID, req.Agent, err)
 	} else {
 		resp.Status = wire.ToolStatusSuccess
-		resp.Content = []wire.ToolResultContent{{Text: result}}
+		resp.Content = content
 	}
 
 	data, merr := json.Marshal(resp)
