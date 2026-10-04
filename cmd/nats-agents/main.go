@@ -56,13 +56,14 @@ Flags:
       --seed STRING     NATS user NKey seed (default: $NATS_KEY)
       --timeout DUR     Discovery window / request timeout (default 3s)
       --json            Raw JSON output instead of tables
-      --session ID      Resume an existing chat session (chat only); every
-                        turn prints its session id, and interactive mode
-                        prints a resume command on exit
-      --user ID         User id for session scoping (chat only)
+      --session ID      Resume an existing chat session (chat); on tool run,
+                        the sessionId sent with the call. Every chat turn
+                        prints its session id, and interactive mode prints a
+                        resume command on exit
+      --user ID         User id for session scoping (chat; sent on tool run)
       --idt TOKEN       Internal Delegation Token sent as X-TRX-IDT on agent
-                        chat/invoke/sessions calls (default: $TRX_IDT); tool
-                        run does not use it
+                        chat/invoke/sessions calls and tool runs
+                        (default: $TRX_IDT)
       --version         Print version and exit
 
 Connection resolution — nats CLI contexts are first-class: with no options,
@@ -444,7 +445,7 @@ func runTool(ctx context.Context, tc *toolclient.Client, name, rawInput string, 
 	if card, err := tc.Card(ctx, name); err == nil && card.TimeoutSeconds > 0 {
 		timeout = time.Duration(card.TimeoutSeconds)*time.Second + 10*time.Second
 	}
-	resp, err := tc.Run(ctx, name, wire.ToolRunRequest{Input: input, Agent: "nats-agents-cli"}, timeout)
+	resp, err := tc.Run(ctx, name, wire.ToolRunRequest{Input: input, SessionID: cfg.session, UserID: cfg.user, Agent: "nats-agents-cli"}, timeout)
 	exitIf(err)
 	printJSON(resp)
 	if resp.Status == wire.ToolStatusError {

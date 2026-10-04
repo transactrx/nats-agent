@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
+	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -93,7 +94,7 @@ type Agent struct {
 	sessions  SessionStore
 	extra     []nats_service.EndpointRegistration
 	startTime time.Time
-	idt       *idtValidator
+	idt       *idt.Validator
 
 	mu   sync.Mutex
 	runs map[string]*run
@@ -185,12 +186,12 @@ func New(cfg Config) (*Agent, error) {
 		}
 		regional.SetDescription("Regional route for " + cfg.Name + " in " + cfg.Region)
 	}
-	idt := newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
+	validator := idt.NewValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
 	if cfg.IDTValidation.Enabled {
 		// Log the validator's effective (defaulted) subject, not
 		// cfg.IDTValidation.Subject, which may still be "" here.
 		log.Printf("agent %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v cacheTTL=%s)",
-			cfg.Name, idt.cfg.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
+			cfg.Name, validator.Config().Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
 	}
 
 	return &Agent{
@@ -199,7 +200,7 @@ func New(cfg Config) (*Agent, error) {
 		regional: regional,
 		nc:       svc.GetNatsService(),
 		runs:     map[string]*run{},
-		idt:      idt,
+		idt:      validator,
 	}, nil
 }
 
@@ -232,7 +233,7 @@ func (a *Agent) Conn() *nats.Conn { return a.nc }
 // returns the 403 envelope to hand back on deny. Built-in chat/invoke/
 // sessions endpoints call this automatically.
 func (a *Agent) Authorize(msg *nats_service.NatsMessage, sessionID string) (Identity, *nats_service.NatsServiceError) {
-	return a.idt.authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
+	return a.idt.Authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
 }
 
 // Card builds the agent card from the config and wired capabilities.

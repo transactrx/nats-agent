@@ -1,6 +1,15 @@
-package agent
+// Package idt validates the Internal Delegation Token (X-TRX-IDT) that
+// callers attach to authenticated agent and tool requests (SPEC §5.1, §8.4),
+// and carries a token on outbound calls through a context.
+//
+// Agents and tool hosts share one implementation so every principal on the
+// mesh enforces identity the same way: a token is checked against
+// identity's validateInternalToken for the receiver's (appId, functionId),
+// before any work is done.
+package idt
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,14 +23,15 @@ import (
 
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
+	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
-// IDTValidation configures inbound Internal Delegation Token checks. Zero
+// Validation configures inbound Internal Delegation Token checks. Zero
 // value = disabled. Fields mirror the ai-agent-go-service env contract so an
-// org-wide deployment configures every agent the same way.
-type IDTValidation struct {
+// org-wide deployment configures every agent and tool the same way.
+type Validation struct {
 	Enabled     bool          // IDT_VALIDATION
 	ObserveOnly bool          // IDT_OBSERVE_ONLY: validate + log, never block
 	FailOpen    bool          // IDT_FAIL_OPEN: allow when identity is unreachable; never for a missing token
@@ -35,16 +45,16 @@ const (
 	defaultValidateSubject  = "validateInternalToken"
 	defaultValidateTimeout  = 5 * time.Second
 	defaultValidateCacheTTL = 300 * time.Second
-	idtCacheMaxEntries      = 10_000
+	cacheMaxEntries         = 10_000
 	reasonMissingIDT        = "MISSING_IDT"
 	reasonValidateError     = "VALIDATE_ERROR"
 	reasonDeniedFn          = "DENIED_FN"
 	reasonInvalidIdentity   = "INVALID_IDENTITY"
 )
 
-// IDTValidationFromEnv reads the org env contract.
-func IDTValidationFromEnv() IDTValidation {
-	c := IDTValidation{
+// ValidationFromEnv reads the org env contract.
+func ValidationFromEnv() Validation {
+	c := Validation{
 		Enabled:     envBool("IDT_VALIDATION"),
 		ObserveOnly: envBool("IDT_OBSERVE_ONLY"),
 		FailOpen:    envBool("IDT_FAIL_OPEN"),
@@ -77,38 +87,20 @@ func IDTValidationFromEnv() IDTValidation {
 	return c
 }
 
-// accessFromEnv is the Config.Access fallback (APP_ID / APP_FUNCTION_ID).
-// Returns nil unless BOTH are set: a partial declaration (e.g. APP_ID with no
-// APP_FUNCTION_ID) would otherwise advertise a card with an empty
-// functionId, which downstream identity checks treat as BAD_REQUEST for
-// every caller.
-func accessFromEnv() *wire.AgentAccess {
-	appID := strings.TrimSpace(os.Getenv("APP_ID"))
-	fnID := strings.TrimSpace(os.Getenv("APP_FUNCTION_ID"))
-	if appID == "" && fnID == "" {
-		return nil
-	}
-	if appID == "" || fnID == "" {
-		log.Printf("IDT_METRIC event=access.misconfig reason=partial_env")
-		return nil
-	}
-	return &wire.AgentAccess{AppID: appID, FunctionID: fnID}
-}
-
 func envBool(key string) bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv(key)), "true")
 }
 
-// Identity is what the runtime learned about the caller of a request.
+// Identity is what the receiver learned about the caller of a request.
 type Identity struct {
 	UserID    string
 	AccountID string
 	// Verified is true only when identity confirmed the token AND granted
-	// this agent's function. False in pass-through modes (validation off,
-	// observe-only, fail-open) — treat the body's userId as caller-asserted.
+	// the receiver's function. False in pass-through modes (validation off,
+	// observe-only, fail-open) — treat any body userId as caller-asserted.
 	Verified bool
-	// IDT is the raw header value, exposed so agents can forward it on
-	// agent→agent / agent→tool calls via agentclient.WithIDT.
+	// IDT is the raw header value, exposed so the receiver can forward it on
+	// onward calls via WithToken.
 	IDT string
 }
 
@@ -132,9 +124,10 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-type idtValidator struct {
-	cfg    IDTValidation
-	access *wire.AgentAccess
+// Validator authorizes requests for one (appId, functionId) registration.
+type Validator struct {
+	cfg    Validation
+	access wire.AgentAccess
 	nc     *nats.Conn
 	logger *log.Logger
 	// call performs the identity round-trip; replaced in unit tests.
@@ -144,7 +137,10 @@ type idtValidator struct {
 	cache map[string]cacheEntry
 }
 
-func newIDTValidator(nc *nats.Conn, access *wire.AgentAccess, cfg IDTValidation, logger *log.Logger) *idtValidator {
+// NewValidator builds a validator for the receiver registered as access.
+// access may be nil only when cfg is disabled; callers must refuse an
+// enabled configuration without a complete access declaration.
+func NewValidator(nc *nats.Conn, access *wire.AgentAccess, cfg Validation, logger *log.Logger) *Validator {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -154,18 +150,23 @@ func newIDTValidator(nc *nats.Conn, access *wire.AgentAccess, cfg IDTValidation,
 	if cfg.Subject == "" {
 		cfg.Subject = defaultIdentityBasePath + "." + defaultValidateSubject
 	}
-	if cfg.Enabled && access == nil {
-		// agent.New already refuses this configuration; guard here too so the
-		// invariant (authorize can always deref v.access) holds locally.
+	var a wire.AgentAccess
+	if access != nil {
+		a = *access
+	} else if cfg.Enabled {
+		// Constructors already refuse this configuration; guard here too so
+		// Authorize never runs against a nil declaration.
 		logger.Printf("IDT_METRIC event=validate.misconfig reason=missing_access")
-		access = &wire.AgentAccess{}
 	}
-	v := &idtValidator{cfg: cfg, access: access, nc: nc, logger: logger, cache: map[string]cacheEntry{}}
+	v := &Validator{cfg: cfg, access: a, nc: nc, logger: logger, cache: map[string]cacheEntry{}}
 	v.call = v.natsCall
 	return v
 }
 
-func (v *idtValidator) natsCall(req validateRequest) (validateResponse, error) {
+// Config returns the effective configuration (defaults applied).
+func (v *Validator) Config() Validation { return v.cfg }
+
+func (v *Validator) natsCall(req validateRequest) (validateResponse, error) {
 	var resp validateResponse
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -205,9 +206,9 @@ func idPrefix(idt string) string {
 // cacheKey authenticates on the full token (via its hash), never the
 // human-readable prefix alone, so a forged cipher tail sharing a cached
 // token's prefix cannot ride that cache entry.
-func cacheKey(idt, sessionID, appID, fnID string) string {
+func cacheKey(idt, scope, appID, fnID string) string {
 	sum := sha256.Sum256([]byte(idt))
-	return hex.EncodeToString(sum[:]) + "|" + sessionID + "|" + appID + "|" + fnID
+	return hex.EncodeToString(sum[:]) + "|" + scope + "|" + appID + "|" + fnID
 }
 
 func forbidden(reason string) *nats_service.NatsServiceError {
@@ -215,16 +216,17 @@ func forbidden(reason string) *nats_service.NatsServiceError {
 	return &e
 }
 
-// authorize decides whether a request carrying idt (header value, may be
-// empty) for sessionID may proceed. Returns the caller Identity on allow, or
-// a 403 envelope. Pass-through modes return Verified=false, never an error.
-func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service.NatsServiceError) {
-	idt = strings.TrimSpace(idt)
+// Authorize decides whether a request carrying token (header value, may be
+// empty) may proceed. scope partitions the decision cache (an agent passes
+// the session id). Returns the caller Identity on allow, or a 403 envelope.
+// Pass-through modes return Verified=false, never an error.
+func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.NatsServiceError) {
+	token = strings.TrimSpace(token)
 	if !v.cfg.Enabled {
-		return Identity{IDT: idt}, nil
+		return Identity{IDT: token}, nil
 	}
 	appID, fnID := v.access.AppID, v.access.FunctionID
-	if idt == "" {
+	if token == "" {
 		// FailOpen only covers identity being unreachable, never a missing
 		// token — a caller that sends no header at all must always be
 		// denied unless we're in observe-only (log, don't block).
@@ -237,27 +239,27 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 		return Identity{}, forbidden(reasonMissingIDT)
 	}
 
-	key := cacheKey(idt, sessionID, appID, fnID)
+	key := cacheKey(token, scope, appID, fnID)
 	if v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
 		if e, ok := v.cache[key]; ok && time.Now().Before(e.expires) {
 			v.mu.Unlock()
 			id := e.id
-			id.IDT = idt
+			id.IDT = token
 			return id, nil
 		}
 		v.mu.Unlock()
 	}
 
-	resp, err := v.call(validateRequest{IDT: idt, AgentID: appID, FunctionID: fnID})
+	resp, err := v.call(validateRequest{IDT: token, AgentID: appID, FunctionID: fnID})
 	if err != nil {
 		if v.cfg.ObserveOnly || v.cfg.FailOpen {
 			v.logger.Printf("IDT_METRIC event=validate.pass_through reason=%s agent=%s function=%s idtid=%q err=%q",
-				reasonValidateError, appID, fnID, idPrefix(idt), err.Error())
-			return Identity{IDT: idt}, nil
+				reasonValidateError, appID, fnID, idPrefix(token), err.Error())
+			return Identity{IDT: token}, nil
 		}
 		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q err=%q",
-			reasonValidateError, appID, fnID, idPrefix(idt), err.Error())
+			reasonValidateError, appID, fnID, idPrefix(token), err.Error())
 		return Identity{}, forbidden(reasonValidateError)
 	}
 
@@ -281,33 +283,33 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 	if reason != "" {
 		if v.cfg.ObserveOnly {
 			v.logger.Printf("IDT_METRIC event=validate.observe decision=deny reason=%s agent=%s function=%s idtid=%q user=%s",
-				reason, appID, fnID, idPrefix(idt), resp.UserID)
-			return Identity{IDT: idt}, nil
+				reason, appID, fnID, idPrefix(token), resp.UserID)
+			return Identity{IDT: token}, nil
 		}
 		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q user=%s account=%s",
-			reason, appID, fnID, idPrefix(idt), resp.UserID, resp.AccountID)
+			reason, appID, fnID, idPrefix(token), resp.UserID, resp.AccountID)
 		return Identity{}, forbidden(reason)
 	}
 
-	id := Identity{UserID: resp.UserID, AccountID: resp.AccountID, Verified: !v.cfg.ObserveOnly, IDT: idt}
+	id := Identity{UserID: resp.UserID, AccountID: resp.AccountID, Verified: !v.cfg.ObserveOnly, IDT: token}
 	if v.cfg.ObserveOnly {
-		v.logger.Printf("IDT_METRIC event=validate.observe decision=allow agent=%s function=%s idtid=%q user=%s", appID, fnID, idPrefix(idt), resp.UserID)
+		v.logger.Printf("IDT_METRIC event=validate.observe decision=allow agent=%s function=%s idtid=%q user=%s", appID, fnID, idPrefix(token), resp.UserID)
 		// Never cache in observe-only: caching an allow would silence the
 		// per-request observe log after the first hit, undercounting the
 		// rollout signal this mode exists to produce.
 		return id, nil
 	}
-	v.logger.Printf("IDT_METRIC event=validate.allow agent=%s function=%s idtid=%q user=%s account=%s", appID, fnID, idPrefix(idt), resp.UserID, resp.AccountID)
+	v.logger.Printf("IDT_METRIC event=validate.allow agent=%s function=%s idtid=%q user=%s account=%s", appID, fnID, idPrefix(token), resp.UserID, resp.AccountID)
 	if v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
-		if len(v.cache) >= idtCacheMaxEntries {
+		if len(v.cache) >= cacheMaxEntries {
 			now := time.Now()
 			for k, e := range v.cache {
 				if now.After(e.expires) {
 					delete(v.cache, k)
 				}
 			}
-			if len(v.cache) >= idtCacheMaxEntries { // still full: drop everything rather than grow unbounded
+			if len(v.cache) >= cacheMaxEntries { // still full: drop everything rather than grow unbounded
 				v.cache = map[string]cacheEntry{}
 			}
 		}
@@ -315,4 +317,31 @@ func (v *idtValidator) authorize(idt, sessionID string) (Identity, *nats_service
 		v.mu.Unlock()
 	}
 	return id, nil
+}
+
+type tokenCtxKey struct{}
+
+// WithToken returns a context carrying the caller's Internal Delegation
+// Token. Authenticated calls made with it (agent chat/invoke/sessions, tool
+// runs) send it as the X-TRX-IDT header. Empty token is a no-op.
+func WithToken(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenCtxKey{}, token)
+}
+
+// TokenFromContext returns the token set by WithToken, or "".
+func TokenFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(tokenCtxKey{}).(string)
+	return v
+}
+
+// Header returns the X-TRX-IDT request header for ctx's token, or nil.
+func Header(ctx context.Context) nats_service_client.Header {
+	token := TokenFromContext(ctx)
+	if token == "" {
+		return nil
+	}
+	return nats_service_client.Header{wire.HeaderIDT: []string{token}}
 }

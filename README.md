@@ -73,6 +73,29 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 | `IDT_VALIDATE_TIMEOUT_SECONDS` | Per-call timeout (default 5s) |
 | `IDT_VALIDATE_CACHE_SECONDS` | Cache TTL, keyed on sha256(token)+session+app+function (default 300s; deny and observe-only results are never cached) |
 
+### Authenticated tools (protocol 1.2)
+
+A tool host enforces the same token checks on `trx.tool.<name>.run`. Declare
+the tool's identity registration in `tool.Info.Access`; `tool.NewHost()`
+reads the env contract above (`tool.NewHostWithNATS` + `SetIDTValidation`
+for explicit setups). Implement `tool.CallTool` to receive the verified
+caller, `sessionId` and `toolUseId`:
+
+```go
+func (t *myTool) RunCall(ctx context.Context, call tool.Call) ([]wire.ToolResultContent, error) {
+    // call.Identity.Verified, call.Identity.UserID, call.SessionID ...
+    // idt.TokenFromContext(ctx) forwards the caller's token on onward calls.
+}
+
+h.Register(&myTool{}, &tool.Info{
+    Access:        &wire.AgentAccess{AppID: "myAppId", FunctionID: "myFnId"},
+    MaxConcurrent: 8, // 429/4291 beyond this, per host process
+})
+```
+
+Callers attach the token exactly as for agents: `idt.WithToken(ctx, token)`
+(or `agentclient.WithIDT`) before `toolclient` `Run`.
+
 ## Talking to an agent
 
 ```go
@@ -164,7 +187,8 @@ leave — it prints a `--session` command to resume the same conversation
 later). `--session ID` resumes a session in one-shot mode too, and `--user ID`
 sets the user id sessions are scoped under. `--idt TOKEN` (default `$TRX_IDT`)
 sends the Internal Delegation Token as `X-TRX-IDT` on `chat` for agents with
-IDT validation enabled; `run` (network tool execution) does not use it.
+IDT validation enabled, and on `run` (network tool execution) for tools that
+declare access (protocol 1.2); `run` also sends `--session` and `--user`.
 
 ### Regional agent routes
 

@@ -13,6 +13,7 @@ import (
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
+	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -21,6 +22,9 @@ const (
 	// runTimeoutMargin is added to a tool card's advisory timeoutSeconds to
 	// size the request timeout.
 	runTimeoutMargin = 10 * time.Second
+	// defaultRunTimeout applies when neither the caller nor the card names
+	// one: the host's default advisory timeout plus margin.
+	defaultRunTimeout = 30*time.Second + runTimeoutMargin
 )
 
 // ServiceError is a protocol-level error reply from a tool (§9 envelope).
@@ -118,26 +122,55 @@ func (c *Client) Card(ctx context.Context, name string) (*wire.ToolCard, error) 
 }
 
 // Run executes a tool. timeout <= 0 defaults to the standard advisory
-// timeout plus margin; when the caller knows the card, prefer
-// RunWithCard so the timeout matches the tool's own advertisement.
+// timeout plus margin; when the caller knows the card, prefer Registry.Run
+// so the timeout matches the tool's own advertisement.
+//
+// A token set on ctx with idt.WithToken (or agentclient.WithIDT) is sent as
+// the X-TRX-IDT header (SPEC §8.4). Run returns when ctx is done even if the
+// tool has not replied; the tool itself is not interrupted.
 func (c *Client) Run(ctx context.Context, name string, req wire.ToolRunRequest, timeout time.Duration) (*wire.ToolRunResponse, error) {
 	if timeout <= 0 {
-		timeout = 30*time.Second + runTimeoutMargin
+		timeout = defaultRunTimeout
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("running tool %s: %w", name, err)
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	resp, svcErr, err := c.svc.DoRequest("", wire.ToolSubject(name, "run"), nil, body, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("running tool %s: %w", name, err)
+
+	type result struct {
+		out *wire.ToolRunResponse
+		err error
 	}
-	if svcErr != nil {
-		return nil, &ServiceError{*svcErr}
+	done := make(chan result, 1)
+	go func() {
+		resp, svcErr, err := c.svc.DoRequest("", wire.ToolSubject(name, "run"), idt.Header(ctx), body, timeout)
+		if err != nil {
+			done <- result{err: fmt.Errorf("running tool %s: %w", name, err)}
+			return
+		}
+		if svcErr != nil {
+			done <- result{err: &ServiceError{*svcErr}}
+			return
+		}
+		var out wire.ToolRunResponse
+		if err := json.Unmarshal(resp.Data, &out); err != nil {
+			done <- result{err: fmt.Errorf("decoding reply of tool %s: %w", name, err)}
+			return
+		}
+		done <- result{out: &out}
+	}()
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("running tool %s: %w", name, ctx.Err())
 	}
-	var out wire.ToolRunResponse
-	if err := json.Unmarshal(resp.Data, &out); err != nil {
-		return nil, fmt.Errorf("decoding reply of tool %s: %w", name, err)
-	}
-	return &out, nil
 }

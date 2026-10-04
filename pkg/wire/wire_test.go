@@ -23,7 +23,7 @@ func TestAgentCardAccessRoundTrip(t *testing.T) {
 	if string(data) != "" && containsKey(data, "access") {
 		t.Fatalf("empty access must be omitted: %s", data)
 	}
-	if ProtocolVersion != "1.1" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
+	if ProtocolVersion != "1.2" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
 		t.Fatalf("protocol constants: %s %d %s", ProtocolVersion, CodeForbidden, HeaderIDT)
 	}
 }
