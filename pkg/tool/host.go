@@ -11,6 +11,8 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -84,6 +86,8 @@ type hostedTool struct {
 	startTime   time.Time
 	validator   *idt.Validator
 	slots       chan struct{}
+	active      sync.WaitGroup
+	inFlight    atomic.Int64
 }
 
 // Host serves registered tools over NATS.
@@ -263,6 +267,37 @@ func (h *Host) Start() error {
 	return nil
 }
 
+// Drain stops every tool from taking new runs (the queue group routes them
+// to other hosts) and waits until in-flight runs finish or ctx ends. Call
+// Shutdown afterwards. Returns the runs still active when it gave up.
+func (h *Host) Drain(ctx context.Context) int64 {
+	for _, ht := range h.tools {
+		if ht.discoverSub != nil {
+			_ = ht.discoverSub.Drain()
+		}
+		if ht.svc != nil {
+			_ = ht.svc.Shutdown()
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, ht := range h.tools {
+			ht.active.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return 0
+	case <-ctx.Done():
+		var n int64
+		for _, ht := range h.tools {
+			n += ht.inFlight.Load()
+		}
+		return n
+	}
+}
+
 // Shutdown drains all tool subscriptions.
 func (h *Host) Shutdown() {
 	for _, ht := range h.tools {
@@ -315,6 +350,9 @@ func (ht *hostedTool) handlePing(msg *nats_service.NatsMessage) *nats_service.Na
 }
 
 func (ht *hostedTool) handleRun(msg *nats_service.NatsMessage) *nats_service.NatsServiceError {
+	ht.active.Add(1)
+	ht.inFlight.Add(1)
+	defer func() { ht.inFlight.Add(-1); ht.active.Done() }()
 	var req wire.ToolRunRequest
 	if err := json.Unmarshal(msg.Body, &req); err != nil {
 		e := nats_service.NewValidationError("invalid request body", wire.CodeInvalidBody, err)

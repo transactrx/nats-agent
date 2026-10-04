@@ -408,8 +408,43 @@ func (a *Agent) Start() error {
 	return nil
 }
 
+// ActiveRuns reports how many chat/invoke runs this instance is serving.
+func (a *Agent) ActiveRuns() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.runs)
+}
+
+// Drain prepares this instance to stop without dropping work: it stops
+// taking new requests (the queue group routes them to other instances),
+// keeps cancel subscribed so users can still stop their runs, and waits
+// until in-flight runs finish or ctx ends. Call Shutdown afterwards. Returns
+// the number of runs still active when it gave up (0 = clean).
+func (a *Agent) Drain(ctx context.Context) int {
+	if a.regional != nil {
+		_ = a.regional.Shutdown()
+	}
+	if a.discoverSub != nil {
+		_ = a.discoverSub.Drain()
+	}
+	_ = a.svc.Shutdown()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		n := a.ActiveRuns()
+		if n == 0 {
+			return 0
+		}
+		select {
+		case <-ctx.Done():
+			return n
+		case <-tick.C:
+		}
+	}
+}
+
 // Shutdown drains subscriptions. In-flight runs keep their contexts until
-// the process exits.
+// the process exits; use Drain first to let them finish.
 func (a *Agent) Shutdown() error {
 	if a.regional != nil {
 		_ = a.regional.Shutdown()
