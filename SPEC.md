@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.1 (draft)
+# NATS Agent Protocol — Specification v1.2 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -233,7 +233,7 @@ Returned immediately, before inference starts:
 }
 ```
 
-Validation failures return the error envelope (§8) instead of an ack, and
+Validation failures return the error envelope (§9) instead of an ack, and
 nothing is published to `streamSubject`.
 
 ### 5.3 Event stream
@@ -256,7 +256,7 @@ loss. Exactly one terminal event (`done` or `error`) ends the run.
 | `status` | `statusText` | Human-readable progress ("querying database…"). Optional. |
 | `ping` | — | Heartbeat. Agents MUST emit at least every 15s while the run is live and idle. |
 | `done` | `stopReason`, `usage` `{inputTokens,outputTokens,totalTokens}` (optional) | Terminal success. `stopReason`: `endTurn`, `maxTokens`, `cancelled`, `maxIterations`. |
-| `error` | `error`, `status` (int, §8 code) | Terminal failure. |
+| `error` | `error`, `errorStatus` (int, §9 code) | Terminal failure. |
 
 Notes:
 
@@ -321,7 +321,7 @@ published to `trx.tool.announce`:
 
 ```json
 {
-  "protocolVersion": "1.0",
+  "protocolVersion": "1.2",
   "kind": "tool",
   "name": "quickchart",
   "displayName": "Chart Renderer",
@@ -331,6 +331,7 @@ published to `trx.tool.announce`:
   "tags": ["visualization"],
   "inputSchema": { "type": "object", "properties": { "chart": { "type": "object" } }, "required": ["chart"] },
   "timeoutSeconds": 30,
+  "access": { "appId": "commonToolsAppId", "functionId": "chartRendererFnId" },
   "metadata": {}
 }
 ```
@@ -341,6 +342,9 @@ published to `trx.tool.announce`:
   `inferenceGateway` `ToolSpec.inputSchema`.
 - `timeoutSeconds` is the advisory worst-case execution time; callers use it
   to size their request timeout.
+- `access` (optional, v1.2) registers the tool with the identity model exactly
+  like an agent card's (§4.2): a caller may run the tool iff the user behind
+  their token holds `functionId`. Absent = runs are not authenticated.
 
 ### 8.2 Tool hosts
 
@@ -373,6 +377,7 @@ Request:
   "toolUseId": "tu_01ABC...",
   "input": { "chart": { "...": "..." } },
   "userId": "manuel.elaraj",
+  "sessionId": "6f9c2c1e-...",
   "agent": "copayAssistant",
   "metadata": {}
 }
@@ -399,7 +404,21 @@ Reply:
   `json` entries), so the caller maps the reply 1:1 onto a `toolResult`
   content block.
 - `toolUseId` is the caller's correlation id, echoed back. `userId` and
-  `agent` identify who is asking, for auditing now and access control later.
+  `agent` identify who is asking.
+- `sessionId` (optional, v1.2) names the conversation the call belongs to, so
+  a tool can keep per-conversation state. It is a locator, never a
+  capability: a tool binds it to the verified caller.
+- **Authentication (v1.2):** a tool whose card declares `access` may require
+  the caller's Internal Delegation Token in NATS header `X-TRX-IDT`, verified
+  exactly as in §5.1 against the tool's `access` before the tool runs. On
+  failure the reply is the error envelope with status 403 / code 4031 (§9
+  reasons) and the tool does not execute. When verified, `userId` is derived
+  from the token and the body's value is ignored. `card`, `ping`, `discover`
+  and `announce` are unauthenticated. Callers send the token only on `run`.
+  Until downscoped delegation exists (IDENTITY-AND-AUTHORITY.md §4) the token
+  forwarded is the caller's own; tools must not pass it to anything outside
+  their own trust boundary.
+- A tool at capacity replies 429 / code 4291 without executing.
 - Execution is synchronous request/reply in v1; long-running tools with
   progress streaming are a candidate for a MINOR revision.
 
@@ -455,7 +474,16 @@ Same envelope as every transactrx service (`nats-service`
   `IDT_VALIDATE_CACHE_SECONDS`, default cache 300s, keyed per session on
   sha256(full token)+session+app+function; denies and observe-only results
   are never cached). Callers set the outbound header with
-  `agentclient.WithIDT(ctx, idt)`.
+  `agentclient.WithIDT(ctx, idt)` (equivalently `idt.WithToken`).
+- **Tool IDT enforcement** (Go library, v1.2): the validator lives in
+  `pkg/idt` and is shared by agents and tool hosts. `tool.Info.Access` sets a
+  tool card's `access`; `tool.NewHost()` reads the same env contract (or
+  `Host.SetIDTValidation`), and a host with validation enabled refuses to
+  start a tool without `Access`. A tool implementing `tool.CallTool` receives
+  the verified `Identity`, `sessionId` and `toolUseId`, and its run context
+  carries the token for onward calls. `tool.Info.MaxConcurrent` bounds
+  simultaneous runs (429/4291). `toolclient` sends the token from the
+  context on `run` only and returns when the context is done.
 - **First implementor**: the copay chat application. `copayprogramsapi`'s
   assistant becomes agent `copayAssistant`; the `copayAssistance` SSE bridge
   switches to the agent client, hardcoded to `copayAssistant` until the

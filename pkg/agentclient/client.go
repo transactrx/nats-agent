@@ -13,6 +13,7 @@ import (
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
+	idtpkg "github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -134,30 +135,21 @@ func scatterGather(ctx context.Context, nc *nats.Conn, subject string, req any, 
 	}
 }
 
-type idtCtxKey struct{}
-
 // WithIDT returns a context carrying the caller's Internal Delegation Token.
 // Every authenticated call (Chat, Invoke, Sessions*) made with this context
-// sends it as the X-TRX-IDT NATS header. Empty idt is a no-op.
+// sends it as the X-TRX-IDT NATS header, as do tool runs made through
+// toolclient. Empty idt is a no-op.
 func WithIDT(ctx context.Context, idt string) context.Context {
-	if idt == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, idtCtxKey{}, idt)
+	return idtpkg.WithToken(ctx, idt)
 }
 
 // IDTFromContext returns the token set by WithIDT, or "".
 func IDTFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(idtCtxKey{}).(string)
-	return v
+	return idtpkg.TokenFromContext(ctx)
 }
 
 func idtHeader(ctx context.Context) nats_service_client.Header {
-	idt := IDTFromContext(ctx)
-	if idt == "" {
-		return nil
-	}
-	return nats_service_client.Header{wire.HeaderIDT: []string{idt}}
+	return idtpkg.Header(ctx)
 }
 
 // requestJSON does one documented request/reply against an agent endpoint.

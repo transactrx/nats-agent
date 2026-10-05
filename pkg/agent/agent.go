@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
+	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -93,7 +94,7 @@ type Agent struct {
 	sessions  SessionStore
 	extra     []nats_service.EndpointRegistration
 	startTime time.Time
-	idt       *idtValidator
+	idt       *idt.Validator
 
 	mu   sync.Mutex
 	runs map[string]*run
@@ -185,12 +186,12 @@ func New(cfg Config) (*Agent, error) {
 		}
 		regional.SetDescription("Regional route for " + cfg.Name + " in " + cfg.Region)
 	}
-	idt := newIDTValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
+	validator := idt.NewValidator(svc.GetNatsService(), cfg.Access, *cfg.IDTValidation, nil)
 	if cfg.IDTValidation.Enabled {
 		// Log the validator's effective (defaulted) subject, not
 		// cfg.IDTValidation.Subject, which may still be "" here.
 		log.Printf("agent %q: IDT validation enabled (subject=%s appId=%s functionId=%s observeOnly=%v failOpen=%v cacheTTL=%s)",
-			cfg.Name, idt.cfg.Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
+			cfg.Name, validator.Config().Subject, cfg.Access.AppID, cfg.Access.FunctionID, cfg.IDTValidation.ObserveOnly, cfg.IDTValidation.FailOpen, cfg.IDTValidation.CacheTTL)
 	}
 
 	return &Agent{
@@ -199,7 +200,7 @@ func New(cfg Config) (*Agent, error) {
 		regional: regional,
 		nc:       svc.GetNatsService(),
 		runs:     map[string]*run{},
-		idt:      idt,
+		idt:      validator,
 	}, nil
 }
 
@@ -232,7 +233,7 @@ func (a *Agent) Conn() *nats.Conn { return a.nc }
 // returns the 403 envelope to hand back on deny. Built-in chat/invoke/
 // sessions endpoints call this automatically.
 func (a *Agent) Authorize(msg *nats_service.NatsMessage, sessionID string) (Identity, *nats_service.NatsServiceError) {
-	return a.idt.authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
+	return a.idt.Authorize(msg.Header.Get(wire.HeaderIDT), sessionID)
 }
 
 // Card builds the agent card from the config and wired capabilities.
@@ -407,8 +408,43 @@ func (a *Agent) Start() error {
 	return nil
 }
 
+// ActiveRuns reports how many chat/invoke runs this instance is serving.
+func (a *Agent) ActiveRuns() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.runs)
+}
+
+// Drain prepares this instance to stop without dropping work: it stops
+// taking new requests (the queue group routes them to other instances),
+// keeps cancel subscribed so users can still stop their runs, and waits
+// until in-flight runs finish or ctx ends. Call Shutdown afterwards. Returns
+// the number of runs still active when it gave up (0 = clean).
+func (a *Agent) Drain(ctx context.Context) int {
+	if a.regional != nil {
+		_ = a.regional.Shutdown()
+	}
+	if a.discoverSub != nil {
+		_ = a.discoverSub.Drain()
+	}
+	_ = a.svc.Shutdown()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		n := a.ActiveRuns()
+		if n == 0 {
+			return 0
+		}
+		select {
+		case <-ctx.Done():
+			return n
+		case <-tick.C:
+		}
+	}
+}
+
 // Shutdown drains subscriptions. In-flight runs keep their contexts until
-// the process exits.
+// the process exits; use Drain first to let them finish.
 func (a *Agent) Shutdown() error {
 	if a.regional != nil {
 		_ = a.regional.Shutdown()

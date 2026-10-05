@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -143,7 +144,10 @@ func (r *Registry) Run(ctx context.Context, name string, req wire.ToolRunRequest
 	if !ok {
 		return nil, fmt.Errorf("network tool %q is not in the registry", name)
 	}
-	timeout := time.Duration(card.TimeoutSeconds)*time.Second + runTimeoutMargin
+	timeout := defaultRunTimeout
+	if card.TimeoutSeconds > 0 {
+		timeout = time.Duration(card.TimeoutSeconds)*time.Second + runTimeoutMargin
+	}
 	return r.client.Run(ctx, name, req, timeout)
 }
 
@@ -186,7 +190,9 @@ func (r *Registry) absorb(cards []wire.ToolCard) {
 	r.mu.Lock()
 	for _, c := range cards {
 		prev, existed := r.tools[c.Name]
-		if !existed || prev.card.Version != c.Version || prev.card.Description != c.Description {
+		// Any card change (schema, timeout, access, description) must reach
+		// consumers; tools do not always bump Version for those.
+		if !existed || !reflect.DeepEqual(prev.card, c) {
 			changed = true
 		}
 		r.tools[c.Name] = registryEntry{card: c, lastSeen: now}
