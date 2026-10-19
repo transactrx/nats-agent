@@ -38,6 +38,7 @@ if err != nil { log.Panic(err) } // fail fast
 a.UseSessionStore(myDynamoStore) // optional: advertises capability "sessions"
 
 a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
+    system := basePrompt + "\n\n" + turn.ContextLine() // who is asking + their local time
     stream.Status("thinking…")
     // ... call trx.inferenceGateway, run tools ...
     stream.ToolUse("tu_1", "query_copay_db", input)
@@ -73,6 +74,15 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 | `IDT_VALIDATE_TIMEOUT_SECONDS` | Per-call timeout (default 5s) |
 | `IDT_VALIDATE_CACHE_SECONDS` | Cache TTL, keyed on sha256(token)+session+app+function (default 300s; deny and observe-only results are never cached) |
 
+### User context (protocol 1.3)
+
+Requests may carry `context` `{timeZone, userName, locale}` — display only,
+never authorization. The runtime cleans it before `OnChat` (bad parts are
+dropped, never fatal). Put `turn.ContextLine()` in the system prompt so
+"today" means the user's day; `turn.Now()` / `turn.Location()` give the local
+clock (UTC when unknown). Consults made with the handler's `ctx` forward the
+context automatically. Set `Config.UserContext: true` to advertise it.
+
 ### Authenticated tools (protocol 1.2)
 
 A tool host enforces the same token checks on `trx.tool.<name>.run`. Declare
@@ -103,6 +113,9 @@ c, _ := agentclient.New()
 cards, _ := c.Discover(ctx, wire.DiscoverFilter{}, 0) // every agent on the mesh
 
 ctx = agentclient.WithIDT(ctx, callerIDT) // sent as X-TRX-IDT on chat/invoke/sessions*
+ctx = agentclient.WithUserContext(ctx, &wire.UserContext{ // display only, never authorization
+    TimeZone: browserTimeZone, UserName: "Jane Doe",
+}) // sent as request "context" on chat/invoke
 
 run, _ := c.Chat(ctx, "copayAssistant", wire.ChatRequest{
     UserID:  "manuel",

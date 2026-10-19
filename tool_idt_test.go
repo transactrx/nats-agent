@@ -109,7 +109,7 @@ func TestToolRunIDTAllowedDeniedMissing(t *testing.T) {
 	}
 
 	card, err := tc.Card(context.Background(), "whoami")
-	if err != nil || card.Access == nil || card.Access.FunctionID != "fnTest" || card.ProtocolVersion != "1.2" {
+	if err != nil || card.Access == nil || card.Access.FunctionID != "fnTest" || card.ProtocolVersion != wire.ProtocolVersion {
 		t.Fatalf("card must be public with access and protocol 1.2: %+v %v", card, err)
 	}
 }
