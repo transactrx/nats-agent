@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
+	"github.com/transactrx/nats-agent/pkg/agentclient"
 	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -42,6 +43,17 @@ type Turn struct {
 	// When Identity.Verified, UserID has been replaced by the verified id.
 	Identity Identity
 }
+
+// Location is the user's time zone from the request context, or UTC.
+func (t *Turn) Location() *time.Location { return t.Context.Location() }
+
+// Now is the current time in the user's time zone (UTC when unknown).
+func (t *Turn) Now() time.Time { return time.Now().In(t.Location()) }
+
+// ContextLine is the standard sentence to put in the system prompt so the
+// model knows who is asking and what "today" means for them (see
+// wire.UserContext.Line). Display only, never authorization.
+func (t *Turn) ContextLine() string { return t.Context.Line(time.Now()) }
 
 // ChatHandler runs one streaming chat turn. Emit events through the stream;
 // if the handler returns without emitting a terminal event, the runtime
@@ -69,7 +81,10 @@ type Config struct {
 	InputModalities  []string // default ["text"]
 	OutputModalities []string // default ["text"]
 	Attachments      bool
-	Metadata         map[string]any
+	// UserContext advertises capability "userContext": this agent reads the
+	// user's time zone and name (Turn.ContextLine) and answers in local time.
+	UserContext bool
+	Metadata    map[string]any
 
 	// Access registers this agent with the identity model (card "access").
 	// nil → read APP_ID / APP_FUNCTION_ID from the environment.
@@ -263,6 +278,7 @@ func (a *Agent) Card() wire.AgentCard {
 			Sync:        a.invoke != nil,
 			Sessions:    a.sessions != nil,
 			Attachments: a.cfg.Attachments,
+			UserContext: a.cfg.UserContext,
 		},
 		InputModalities:  a.cfg.InputModalities,
 		OutputModalities: a.cfg.OutputModalities,
@@ -294,7 +310,7 @@ func (a *Agent) Start() error {
 		},
 		{
 			Path:        "chat",
-			Description: "Streaming chat turn. Request: {sessionId?, userId?, message, streamSubject, metadata?}. Replies with an ack; events stream to streamSubject until a terminal done/error event.",
+			Description: "Streaming chat turn. Request: {sessionId?, userId?, message, streamSubject, metadata?, context?}. Replies with an ack; events stream to streamSubject until a terminal done/error event.",
 			Response:    &nats_service.ResponseDoc{Description: "ChatAck", ContentType: "application/json"},
 			Handler:     a.handleChat,
 		},
@@ -503,6 +519,8 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	if req.SessionID == "" {
 		req.SessionID = uuid.New().String()
 	}
+	// Display-only context: bad values are dropped, never fatal.
+	req.Context = req.Context.Normalize()
 	id, aerr := a.Authorize(msg, req.SessionID)
 	if aerr != nil {
 		return nil, aerr
@@ -539,7 +557,7 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 	}
 	msg.ResponseBody = data
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(agentclient.WithUserContext(context.Background(), turn.Context))
 	r := &run{cancel: cancel}
 	a.mu.Lock()
 	a.runs[turn.RunID] = r
@@ -589,7 +607,7 @@ func (a *Agent) handleInvoke(msg *nats_service.NatsMessage) *nats_service.NatsSe
 		return verr
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(agentclient.WithUserContext(context.Background(), turn.Context))
 	defer cancel()
 	a.mu.Lock()
 	a.runs[turn.RunID] = &run{cancel: cancel}

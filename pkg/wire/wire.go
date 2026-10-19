@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.2"
+const ProtocolVersion = "1.3"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -120,6 +120,9 @@ type Capabilities struct {
 	Sync        bool `json:"sync"`
 	Sessions    bool `json:"sessions"`
 	Attachments bool `json:"attachments"`
+	// UserContext (v1.3): the agent reads ChatRequest.context (user's time
+	// zone and name) and answers in the user's local time.
+	UserContext bool `json:"userContext,omitempty"`
 }
 
 // AgentAccess maps an agent onto the identity model: an agent IS an
@@ -151,6 +154,9 @@ type ChatRequest struct {
 	Message       Message        `json:"message"`
 	StreamSubject string         `json:"streamSubject"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
+	// Context (v1.3) is display-only user context (time zone, name, locale).
+	// Never authorization. Agents read it normalized (see UserContext).
+	Context *UserContext `json:"context,omitempty"`
 }
 
 type ChatAck struct {
