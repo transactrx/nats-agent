@@ -169,6 +169,17 @@ func (c *Client) Run(ctx context.Context, name string, req wire.ToolRunRequest, 
 	}()
 	select {
 	case r := <-done:
+		// The request timeout is capped at the caller's deadline, so both can
+		// fire together (and the context's own timer may lag a moment):
+		// report the caller's context error, not nats' timeout.
+		if r.err != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("running tool %s: %w", name, err)
+			}
+			if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+				return nil, fmt.Errorf("running tool %s: %w", name, context.DeadlineExceeded)
+			}
+		}
 		return r.out, r.err
 	case <-ctx.Done():
 		return nil, fmt.Errorf("running tool %s: %w", name, ctx.Err())

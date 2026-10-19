@@ -152,6 +152,35 @@ func idtHeader(ctx context.Context) nats_service_client.Header {
 	return idtpkg.Header(ctx)
 }
 
+type userContextKey struct{}
+
+// WithUserContext returns a context carrying the user's display context
+// (time zone, name). Chat and Invoke made with it fill ChatRequest.Context
+// when the request leaves it nil, so it follows the user from agent to agent.
+// The agent runtime already puts the inbound turn's context on the handler
+// ctx, so consults made with that ctx forward it automatically. nil is a no-op.
+func WithUserContext(ctx context.Context, uc *wire.UserContext) context.Context {
+	if uc = uc.Normalize(); uc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, userContextKey{}, uc)
+}
+
+// UserContextFromContext returns the context set by WithUserContext, or nil.
+func UserContextFromContext(ctx context.Context) *wire.UserContext {
+	uc, _ := ctx.Value(userContextKey{}).(*wire.UserContext)
+	return uc
+}
+
+func withContextFrom(ctx context.Context, req *wire.ChatRequest) {
+	if req.Context == nil {
+		if uc := UserContextFromContext(ctx); uc != nil {
+			cp := *uc
+			req.Context = &cp
+		}
+	}
+}
+
 // requestJSON does one documented request/reply against an agent endpoint.
 func requestJSON[T any](ctx context.Context, c *Client, subject string, body any) (*T, error) {
 	data, err := json.Marshal(body)
@@ -213,6 +242,7 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 	if req.StreamSubject == "" {
 		req.StreamSubject = nats.NewInbox()
 	}
+	withContextFrom(ctx, &req)
 
 	msgs := make(chan *nats.Msg, 512)
 	sub, err := c.nc.ChanSubscribe(req.StreamSubject, msgs)
@@ -301,6 +331,7 @@ func (c *Client) Cancel(ctx context.Context, agent, runID string) (bool, error) 
 // Invoke runs a synchronous turn (capability "sync").
 func (c *Client) Invoke(ctx context.Context, agent string, req wire.ChatRequest) (*wire.InvokeResponse, error) {
 	req.StreamSubject = ""
+	withContextFrom(ctx, &req)
 	return requestJSON[wire.InvokeResponse](ctx, c, wire.AgentSubject(agent, "invoke"), req)
 }
 

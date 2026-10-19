@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.2 (draft)
+# NATS Agent Protocol — Specification v1.3 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -147,7 +147,8 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
     "streaming": true,
     "sync": false,
     "sessions": true,
-    "attachments": false
+    "attachments": false,
+    "userContext": true
   },
   "inputModalities": ["text"],
   "outputModalities": ["text"],
@@ -173,6 +174,9 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
   (`functionId`); a caller may use the agent iff the user behind their token
   holds that function. Absent = undeclared; UIs treat undeclared agents as
   inaccessible when enforcing.
+- `capabilities.userContext` (optional, v1.3) says the agent reads the
+  request `context` (§5.1) and answers in the user's local time. Callers may
+  send `context` to any agent; agents without the capability ignore it.
 - `metadata` is a free-form object for org-specific additions.
 
 ### 4.3 Ping
@@ -196,7 +200,8 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
     "content": [ { "text": "How many claims failed yesterday?" } ]
   },
   "streamSubject": "_INBOX.abc123",
-  "metadata": { "isAdmin": true }
+  "metadata": { "isAdmin": true },
+  "context": { "timeZone": "America/New_York", "userName": "Jane Doe", "locale": "en-US" }
 }
 ```
 
@@ -208,6 +213,21 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
 - `streamSubject` required. Caller MUST be subscribed before sending.
 - `userId` optional but recommended; agents that persist sessions key on it.
 - `metadata` free-form, passed to the agent handler (auth hints, tenant, …).
+- `context` optional (v1.3): **display-only** user context so the model knows
+  who is asking and what "today" means for them. `timeZone` is an IANA name,
+  `userName` a display name, `locale` a BCP 47 tag; all optional.
+  - The UI sets it from the browser (time zone) and the portal session
+    (name); relays and orchestrators forward it unchanged when consulting
+    other agents.
+  - Agents MUST NOT use it for authorization — identity comes from
+    `X-TRX-IDT` only.
+  - Agents normalize it and drop invalid parts instead of failing the turn:
+    unknown time zones and `Local` are dropped; the name keeps letters,
+    digits, spaces and `. ' - ,` (max 80 characters); malformed locales are
+    dropped. With no valid time zone, agents use UTC and say so.
+  - Standard prompt sentence (Go: `turn.ContextLine()`): "The user asking is
+    Jane Doe (time zone America/New_York). Their current local time is
+    Monday, October 19, 2026 9:30 PM EDT; UTC is 2026-10-20 01:30 UTC."
 
 **Authentication (v1.1):** requests to `chat`, `invoke`, `sessions*` carry the
 caller's Internal Delegation Token in NATS header `X-TRX-IDT`. An agent with
@@ -475,6 +495,13 @@ Same envelope as every transactrx service (`nats-service`
   sha256(full token)+session+app+function; denies and observe-only results
   are never cached). Callers set the outbound header with
   `agentclient.WithIDT(ctx, idt)` (equivalently `idt.WithToken`).
+- **User context** (Go library, v1.3): the runtime normalizes
+  `ChatRequest.Context` before the handler runs. `turn.Location()`,
+  `turn.Now()` and `turn.ContextLine()` give the user's zone, local time and
+  the standard prompt sentence. The handler ctx carries the context, so
+  `agentclient.Chat`/`Invoke` made with it forward it to consulted agents;
+  outside a handler use `agentclient.WithUserContext(ctx, uc)`. An explicit
+  `req.Context` wins. `agent.Config.UserContext` advertises the capability.
 - **Tool IDT enforcement** (Go library, v1.2): the validator lives in
   `pkg/idt` and is shared by agents and tool hosts. `tool.Info.Access` sets a
   tool card's `access`; `tool.NewHost()` reads the same env contract (or
