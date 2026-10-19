@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	_ "time/tzdata" // zones must load in minimal images (alpine has no zoneinfo)
 	"unicode"
 )
 
