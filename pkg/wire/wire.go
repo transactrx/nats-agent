@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.3"
+const ProtocolVersion = "1.4"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -94,14 +94,18 @@ type DiscoverFilter struct {
 }
 
 type AgentCard struct {
-	ProtocolVersion  string         `json:"protocolVersion"`
-	Kind             string         `json:"kind"` // always "agent"
-	Name             string         `json:"name"`
-	DisplayName      string         `json:"displayName,omitempty"`
-	Description      string         `json:"description"`
-	Version          string         `json:"version,omitempty"`
-	RepositoryURL    string         `json:"repositoryUrl,omitempty"`
-	Tags             []string       `json:"tags,omitempty"`
+	ProtocolVersion string   `json:"protocolVersion"`
+	Kind            string   `json:"kind"` // always "agent"
+	Name            string   `json:"name"`
+	DisplayName     string   `json:"displayName,omitempty"`
+	Description     string   `json:"description"`
+	Version         string   `json:"version,omitempty"`
+	RepositoryURL   string   `json:"repositoryUrl,omitempty"`
+	Tags            []string `json:"tags,omitempty"`
+	// Category is an optional, display-only grouping label chosen by the
+	// agent (e.g. "Pharmacy"); short preferred. Never used for routing or
+	// authorization (SPEC v1.4).
+	Category         string         `json:"category,omitempty"`
 	Capabilities     Capabilities   `json:"capabilities"`
 	InputModalities  []string       `json:"inputModalities,omitempty"`
 	OutputModalities []string       `json:"outputModalities,omitempty"`

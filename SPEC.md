@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.3 (draft)
+# NATS Agent Protocol — Specification v1.4 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -143,6 +143,7 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
   "version": "1.3.0",
   "repositoryUrl": "https://github.com/transactrx/copayprogramsapi",
   "tags": ["copay", "analytics"],
+  "category": "Pharmacy",
   "capabilities": {
     "streaming": true,
     "sync": false,
@@ -177,6 +178,7 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
 - `capabilities.userContext` (optional, v1.3) says the agent reads the
   request `context` (§5.1) and answers in the user's local time. Callers may
   send `context` to any agent; agents without the capability ignore it.
+- `category` (optional, v1.4): free-text, display-only grouping label chosen by the agent; short preferred; never used for routing or authorization.
 - `metadata` is a free-form object for org-specific additions.
 
 ### 4.3 Ping
