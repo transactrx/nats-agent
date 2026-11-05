@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestAgentCardAccessRoundTrip(t *testing.T) {
 	if string(data) != "" && containsKey(data, "access") {
 		t.Fatalf("empty access must be omitted: %s", data)
 	}
-	if ProtocolVersion != "1.3" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
+	if ProtocolVersion != "1.4" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
 		t.Fatalf("protocol constants: %s %d %s", ProtocolVersion, CodeForbidden, HeaderIDT)
 	}
 }
@@ -33,4 +34,19 @@ func containsKey(data []byte, key string) bool {
 	_ = json.Unmarshal(data, &m)
 	_, ok := m[key]
 	return ok
+}
+
+func TestAgentCardCategoryJSON(t *testing.T) {
+	data, err := json.Marshal(AgentCard{Name: "a", Category: "Pharmacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"category":"Pharmacy"`) {
+		t.Fatalf("category missing: %s", data)
+	}
+	// Empty category must be omitted (pre-1.4 cards stay identical).
+	data, _ = json.Marshal(AgentCard{Name: "b"})
+	if containsKey(data, "category") {
+		t.Fatalf("empty category must be omitted: %s", data)
+	}
 }

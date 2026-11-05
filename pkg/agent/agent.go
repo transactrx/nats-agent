@@ -71,12 +71,15 @@ type InvokeHandler func(ctx context.Context, turn *Turn) (*wire.InvokeResponse, 
 type Config struct {
 	Name string
 	// Region adds a separately queued regional alias without advertising a second agent.
-	Region           string
-	DisplayName      string
-	Description      string
-	Version          string
-	RepositoryURL    string
-	Tags             []string
+	Region        string
+	DisplayName   string
+	Description   string
+	Version       string
+	RepositoryURL string
+	Tags          []string
+	// Category is an optional, display-only grouping label for UIs (card
+	// "category"); short preferred, single value.
+	Category         string
 	Skills           []wire.Skill
 	InputModalities  []string // default ["text"]
 	OutputModalities []string // default ["text"]
@@ -272,6 +275,7 @@ func (a *Agent) Card() wire.AgentCard {
 		Version:         a.cfg.Version,
 		RepositoryURL:   a.cfg.RepositoryURL,
 		Tags:            a.cfg.Tags,
+		Category:        a.cfg.Category,
 		Access:          a.cfg.Access,
 		Capabilities: wire.Capabilities{
 			Streaming:   true,

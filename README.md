@@ -30,6 +30,7 @@ a, err := agent.New(agent.Config{
     Name:        "copayAssistant",
     Description: "Data analyst for the copay programs platform.",
     Version:     "1.0.0",
+    Category:    "Pharmacy", // optional (protocol 1.4): display-only grouping label for UIs; short preferred
     Skills:      []wire.Skill{{Name: "sql", Description: "Answers questions from the copay database."}},
     Access:      &wire.AgentAccess{AppID: "copayassistanceAppId", FunctionID: "copayassistanceFnId"},
 })
