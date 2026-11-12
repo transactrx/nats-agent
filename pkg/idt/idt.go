@@ -295,7 +295,13 @@ func (v *Validator) authorize(token, scope string, useCache bool) (Identity, *na
 		if v.cfg.ObserveOnly {
 			v.logger.Printf("IDT_METRIC event=validate.observe decision=deny reason=%s agent=%s function=%s idtid=%q user=%s",
 				reason, appID, fnID, idPrefix(token), resp.UserID)
-			return Identity{IDT: token}, nil
+			id := Identity{IDT: token}
+			if !useCache {
+				// Fresh checks (renew) compare callers, so they get the ids
+				// identity resolved; Authorize keeps its admission shape.
+				id.UserID, id.AccountID = resp.UserID, resp.AccountID
+			}
+			return id, nil
 		}
 		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q user=%s account=%s",
 			reason, appID, fnID, idPrefix(token), resp.UserID, resp.AccountID)

@@ -157,7 +157,16 @@ func (a *Agent) applyRenew(turn *Turn, body []byte) *wire.RenewResponse {
 	if aerr != nil {
 		return reject(renewInvalidToken)
 	}
-	if !sameCaller(turn.Identity, id) {
+	orig := turn.Identity
+	if !orig.Verified && orig.UserID == "" && id.UserID != "" {
+		// Unverified run admitted without ids (observe deny): learn its
+		// caller from the token it holds now, so another user's token is
+		// still refused.
+		if cur, cerr := a.idt.AuthorizeFresh(turn.CurrentIDT(), turn.SessionID); cerr == nil {
+			orig.UserID, orig.AccountID = cur.UserID, cur.AccountID
+		}
+	}
+	if !sameCaller(orig, id) {
 		return reject(renewIdentityMismatch)
 	}
 	hooks, ok := turn.tok.swap(token, req.ExpiresAtMs)
@@ -165,10 +174,21 @@ func (a *Agent) applyRenew(turn *Turn, body []byte) *wire.RenewResponse {
 		return nil
 	}
 	for _, fn := range hooks {
-		fn(token)
+		runRenewHook(logger, turn.RunID, fn, token)
 	}
 	logger.Printf("run %s: renew applied user=%s account=%s verified=%v", turn.RunID, id.UserID, id.AccountID, id.Verified)
 	return &wire.RenewResponse{Applied: true}
+}
+
+// runRenewHook calls one OnRenew hook; a panic is logged, not propagated, so
+// the remaining hooks run and the renew is still answered.
+func runRenewHook(logger *log.Logger, runID string, fn func(string), token string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logger.Printf("run %s: OnRenew hook panic: %v", runID, rec)
+		}
+	}()
+	fn(token)
 }
 
 // sameCaller reports whether next may replace orig's token. A verified run

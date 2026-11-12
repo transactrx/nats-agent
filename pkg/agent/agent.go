@@ -689,11 +689,8 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 		case errors.Is(context.Cause(ctx), ErrInterrupted):
 			stream.ErrorWithReason("interrupted", wire.CodeInternal, wire.ReasonInterrupted)
 		case errors.Is(context.Cause(ctx), ErrTimeCap):
-			text := "time limit reached"
-			if err != nil {
-				text = err.Error()
-			}
-			stream.ErrorWithReason(text, wire.CodeInternal, wire.ReasonTimeCap)
+			// Fixed text: the handler's raw error is not shown to callers.
+			stream.ErrorWithReason("time limit reached", wire.CodeInternal, wire.ReasonTimeCap)
 		case err != nil:
 			stream.Error(err.Error(), wire.CodeInternal)
 		default:

@@ -87,7 +87,9 @@ func TestTimeCapFallbackReason(t *testing.T) {
 		ret     func(ctx context.Context) error
 		wantErr string
 	}{
-		{"handler returns ctx error", func(ctx context.Context) error { return ctx.Err() }, context.DeadlineExceeded.Error()},
+		// The message is fixed: the handler's raw error text never leaks.
+		{"handler returns ctx error", func(ctx context.Context) error { return ctx.Err() }, "time limit reached"},
+		{"handler returns own error", func(context.Context) error { return errors.New("upstream: secret detail") }, "time limit reached"},
 		{"handler returns nil", func(context.Context) error { return nil }, "time limit reached"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

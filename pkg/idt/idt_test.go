@@ -295,3 +295,21 @@ func TestAuthorizeFreshSkipsCacheRead(t *testing.T) {
 		t.Fatalf("AuthorizeFresh must ask identity again: e=%+v calls=%d", e, calls)
 	}
 }
+
+// Observe-only deny: Authorize keeps its admission shape (no ids), while
+// AuthorizeFresh (renew) returns the ids identity resolved so the caller can
+// be compared. Never verified either way.
+func TestAuthorizeFreshObserveDenyCarriesIDs(t *testing.T) {
+	reason := "DENIED_FN"
+	v := fakeValidator(Validation{Enabled: true, ObserveOnly: true}, func(validateRequest) (validateResponse, error) {
+		return validateResponse{Valid: true, FunctionGranted: false, UserID: "u1", AccountID: "a1", Reason: &reason}, nil
+	})
+	id, e := v.Authorize("IDT-1.c", "s1")
+	if e != nil || id.Verified || id.UserID != "" || id.AccountID != "" || id.IDT != "IDT-1.c" {
+		t.Fatalf("Authorize observe deny changed: %+v %v", id, e)
+	}
+	id, e = v.AuthorizeFresh("IDT-1.c", "s1")
+	if e != nil || id.Verified || id.UserID != "u1" || id.AccountID != "a1" || id.IDT != "IDT-1.c" {
+		t.Fatalf("AuthorizeFresh observe deny = %+v %v, want unverified u1/a1", id, e)
+	}
+}

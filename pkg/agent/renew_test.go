@@ -21,6 +21,7 @@ import (
 type fakeIdentity struct {
 	mu    sync.Mutex
 	users map[string][2]string
+	noFn  map[string]bool // valid tokens whose function is not granted
 	calls int
 }
 
@@ -44,7 +45,9 @@ func startFakeIdentity(t *testing.T, subject string) *fakeIdentity {
 		"IDT-bob.c":         {"bob", "acc1"},
 		"IDT-aliceOther.c":  {"alice", "acc2"},
 		"IDT-aliceCached.c": {"alice", "acc1"},
-	}}
+		"IDT-bobNoFn.c":     {"bob", "acc1"},
+		"IDT-aliceNoFn.c":   {"alice", "acc1"},
+	}, noFn: map[string]bool{"IDT-bobNoFn.c": true, "IDT-aliceNoFn.c": true}}
 	nc := streamConn(t)
 	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
 		var req struct {
@@ -54,10 +57,14 @@ func startFakeIdentity(t *testing.T, subject string) *fakeIdentity {
 		f.mu.Lock()
 		f.calls++
 		u, ok := f.users[req.IDT]
+		noFn := f.noFn[req.IDT]
 		f.mu.Unlock()
 		resp := map[string]any{"valid": false, "functionGranted": false, "reason": "INVALID_IDT"}
 		if ok {
-			resp = map[string]any{"valid": true, "functionGranted": true, "userId": u[0], "accountId": u[1]}
+			resp = map[string]any{"valid": true, "functionGranted": !noFn, "userId": u[0], "accountId": u[1]}
+			if noFn {
+				resp["reason"] = "DENIED_FN"
+			}
 		}
 		data, _ := json.Marshal(resp)
 		_ = m.Respond(data)
@@ -431,6 +438,71 @@ func TestIDTExpiryFromRenew(t *testing.T) {
 	}
 	if _, ok := turn.IDTExpiry(); ok {
 		t.Fatal("IDTExpiry kept after a renew without expiresAtMs")
+	}
+	close(release)
+	drainRun(run)
+}
+
+// Observe mode: identity's observe-deny (valid token, function not granted)
+// still names the user; a renew to another user is refused, whether the
+// other side or the run itself was admitted on such a token.
+func TestRenewObserveModeRefusesOtherUser(t *testing.T) {
+	cases := []struct {
+		name, first, other, same string
+	}{
+		{"renew token not granted", "IDT-alice1.c", "IDT-bobNoFn.c", "IDT-aliceNoFn.c"},
+		{"run token not granted", "IDT-aliceNoFn.c", "IDT-bob.c", "IDT-alice2.c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subj := "test.renew.identity." + strings.ReplaceAll(t.Name(), " ", "_")
+			startFakeIdentity(t, subj)
+			a, turns, release := startRenewAgent(t, testAgentOpts{renew: true, identity: subj, observe: true})
+			run := chatAs(t, a, tc.first)
+			turn := waitTurn(t, turns)
+			if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: tc.other}); resp.Applied || resp.Reason != renewIdentityMismatch {
+				t.Fatalf("observe mode accepted another user's token: %+v", resp)
+			}
+			if turn.CurrentIDT() != tc.first {
+				t.Fatalf("CurrentIDT changed on reject: %q", turn.CurrentIDT())
+			}
+			if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: tc.same}); !resp.Applied {
+				t.Fatalf("observe mode rejected same user's token: %+v", resp)
+			}
+			close(release)
+			drainRun(run)
+		})
+	}
+}
+
+// A panicking OnRenew hook is recovered: later hooks still run and the
+// renew is still acknowledged.
+func TestOnRenewHookPanicRecovered(t *testing.T) {
+	got := make(chan string, 2)
+	release := make(chan struct{})
+	ready := make(chan *Turn, 1)
+	a, _, _ := startRenewAgent(t, testAgentOpts{renew: true, handler: func(ctx context.Context, turn *Turn, stream *Stream) error {
+		turn.OnRenew(func(string) { panic("hook boom") })
+		turn.OnRenew(func(idt string) { got <- idt })
+		ready <- turn
+		<-release
+		return nil
+	}})
+	run := chatAs(t, a, "IDT-x1.c")
+	turn := waitTurn(t, ready)
+	if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: "IDT-x2.c"}); !resp.Applied {
+		t.Fatalf("renew after hook panic: %+v", resp)
+	}
+	select {
+	case idt := <-got:
+		if idt != "IDT-x2.c" {
+			t.Fatalf("second hook got %q", idt)
+		}
+	default:
+		t.Fatal("hook after the panicking one not called")
+	}
+	if turn.CurrentIDT() != "IDT-x2.c" {
+		t.Fatalf("CurrentIDT = %q", turn.CurrentIDT())
 	}
 	close(release)
 	drainRun(run)
