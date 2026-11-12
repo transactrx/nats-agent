@@ -62,8 +62,10 @@ func (t *Turn) ContextLine() string { return t.Context.Line(time.Now()) }
 // ChatHandler runs one streaming chat turn. Emit events through the stream;
 // if the handler returns without emitting a terminal event, the runtime
 // emits done (nil error), error (non-nil), or done/cancelled (run was
-// cancelled). The context is cancelled when the run is cancelled or the
-// agent shuts down.
+// cancelled); when the run ctx ended by its budget (ErrTimeCap) or by
+// InterruptAll (ErrInterrupted), the fallback is an error event carrying
+// reason time_cap / interrupted. The context is cancelled when the run is
+// cancelled or the agent shuts down.
 type ChatHandler func(ctx context.Context, turn *Turn, stream *Stream) error
 
 // InvokeHandler runs one synchronous turn (capability "sync").
@@ -517,6 +519,19 @@ func (a *Agent) Drain(ctx context.Context) int {
 	}
 }
 
+// InterruptAll cancels every run this instance is serving with cause
+// ErrInterrupted (e.g. when Drain gave up before shutdown) and returns how
+// many. Not a user cancel: a chat handler that returns without a terminal
+// frame ends with an error event of reason "interrupted".
+func (a *Agent) InterruptAll() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, r := range a.runs {
+		r.cancel(ErrInterrupted)
+	}
+	return len(a.runs)
+}
+
 // Shutdown drains subscriptions. In-flight runs keep their contexts until
 // the process exits; use Drain first to let them finish.
 func (a *Agent) Shutdown() error {
@@ -671,6 +686,14 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 			// handler already ended the run
 		case wasCancelled:
 			stream.Done(wire.StopCancelled, nil)
+		case errors.Is(context.Cause(ctx), ErrInterrupted):
+			stream.ErrorWithReason("interrupted", wire.CodeInternal, wire.ReasonInterrupted)
+		case errors.Is(context.Cause(ctx), ErrTimeCap):
+			text := "time limit reached"
+			if err != nil {
+				text = err.Error()
+			}
+			stream.ErrorWithReason(text, wire.CodeInternal, wire.ReasonTimeCap)
 		case err != nil:
 			stream.Error(err.Error(), wire.CodeInternal)
 		default:
