@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,5 +114,122 @@ func TestTimeCapFallbackReason(t *testing.T) {
 				t.Fatalf("terminal = %+v, want error %q with reason time_cap", ev, tc.wantErr)
 			}
 		})
+	}
+}
+
+// cutProbeHandler waits for the run ctx to end and reports CutReason(ctx)
+// and the run's user-cancel flag, then returns without a terminal frame.
+func cutProbeHandler(ap *atomic.Pointer[Agent], started chan<- struct{}, seen chan<- [2]any) ChatHandler {
+	return func(ctx context.Context, turn *Turn, stream *Stream) error {
+		started <- struct{}{}
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		a := ap.Load()
+		a.mu.Lock()
+		flag := a.runs[turn.RunID].cancelled
+		a.mu.Unlock()
+		seen <- [2]any{CutReason(ctx), flag}
+		return ctx.Err()
+	}
+}
+
+func cancelRun(t *testing.T, run *agentclient.Run, reason string) {
+	t.Helper()
+	ok, err := run.CancelWithReason(context.Background(), reason)
+	if err != nil || !ok {
+		t.Fatalf("cancel = %v %v, want cancelled:true", ok, err)
+	}
+}
+
+func TestCancelWithoutReasonIsUserCancel(t *testing.T) {
+	var ap atomic.Pointer[Agent]
+	started, seen := make(chan struct{}, 1), make(chan [2]any, 1)
+	a, _, _ := startRenewAgent(t, testAgentOpts{handler: cutProbeHandler(&ap, started, seen)})
+	ap.Store(a)
+	run := chatAs(t, a, "")
+	waitStarted(t, started)
+	ok, err := run.Cancel(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Cancel = %v %v", ok, err)
+	}
+	got := <-seen
+	if got[0] != "" || got[1] != true {
+		t.Fatalf("CutReason=%q cancelled=%v, want \"\" true", got[0], got[1])
+	}
+	if ev := terminal(t, run); ev.Type != wire.EventDone || ev.StopReason != wire.StopCancelled || ev.Reason != "" {
+		t.Fatalf("terminal = %+v, want done/cancelled", ev)
+	}
+}
+
+func TestCancelUnknownReasonIsUserCancel(t *testing.T) {
+	var ap atomic.Pointer[Agent]
+	started, seen := make(chan struct{}, 1), make(chan [2]any, 1)
+	a, _, _ := startRenewAgent(t, testAgentOpts{handler: cutProbeHandler(&ap, started, seen)})
+	ap.Store(a)
+	run := chatAs(t, a, "")
+	waitStarted(t, started)
+	cancelRun(t, run, "user_was_bored")
+	got := <-seen
+	if got[0] != "" || got[1] != true {
+		t.Fatalf("CutReason=%q cancelled=%v, want plain cancel", got[0], got[1])
+	}
+	if ev := terminal(t, run); ev.Type != wire.EventDone || ev.StopReason != wire.StopCancelled {
+		t.Fatalf("terminal = %+v, want done/cancelled", ev)
+	}
+}
+
+func TestCancelWithReasonIsCut(t *testing.T) {
+	for reason, msg := range map[string]string{
+		wire.ReasonProgressIdle:  "stopped: no progress",
+		wire.ReasonTokenRotation: "stopped: access could not be renewed",
+		wire.ReasonInterrupted:   "interrupted",
+		wire.ReasonTimeCap:       "time limit reached",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			var ap atomic.Pointer[Agent]
+			started, seen := make(chan struct{}, 1), make(chan [2]any, 1)
+			a, _, _ := startRenewAgent(t, testAgentOpts{handler: cutProbeHandler(&ap, started, seen)})
+			ap.Store(a)
+			run := chatAs(t, a, "")
+			waitStarted(t, started)
+			cancelRun(t, run, reason)
+			got := <-seen
+			if got[0] != reason || got[1] != false {
+				t.Fatalf("CutReason=%q cancelled=%v, want %q false", got[0], got[1], reason)
+			}
+			ev := terminal(t, run)
+			if ev.Type != wire.EventError || ev.Reason != reason || ev.Error != msg || ev.ErrorStatus != wire.CodeInternal {
+				t.Fatalf("terminal = %+v, want error %q reason %s", ev, msg, reason)
+			}
+		})
+	}
+}
+
+func TestCutReasonMapping(t *testing.T) {
+	cases := []struct {
+		cause error
+		want  string
+	}{
+		{ErrTimeCap, wire.ReasonTimeCap},
+		{ErrInterrupted, wire.ReasonInterrupted},
+		{&CutError{Reason: wire.ReasonProgressIdle}, wire.ReasonProgressIdle},
+		{fmt.Errorf("wrapped: %w", &CutError{Reason: wire.ReasonTokenRotation}), wire.ReasonTokenRotation},
+		{errors.New("other"), ""},
+		{nil, ""},
+	}
+	for _, tc := range cases {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(tc.cause)
+		if got := CutReason(ctx); got != tc.want {
+			t.Fatalf("CutReason(cause %v) = %q, want %q", tc.cause, got, tc.want)
+		}
+	}
+	if got := CutReason(context.Background()); got != "" {
+		t.Fatalf("live ctx: %q", got)
+	}
+	if e := (&CutError{Reason: "progress_idle"}).Error(); e != "turn cut: progress_idle" {
+		t.Fatalf("Error() = %q", e)
 	}
 }

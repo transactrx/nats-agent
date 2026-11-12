@@ -263,6 +263,14 @@ func (r *Run) Cancel(ctx context.Context) (bool, error) {
 	return r.client.Cancel(ctx, r.agent, r.Ack.RunID)
 }
 
+// CancelWithReason cancels this run as a cut by the caller's limits
+// (wire.ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
+// ReasonTimeCap): a 1.5 agent ends it with that reason instead of a user
+// cancel. Older agents treat it as Cancel.
+func (r *Run) CancelWithReason(ctx context.Context, reason string) (bool, error) {
+	return r.client.CancelWithReason(ctx, r.agent, r.Ack.RunID, reason)
+}
+
 // Renew hands the running turn a fresh token (no expiry sent).
 // ErrRenewUnsupported when the agent offered no renew subject.
 func (r *Run) Renew(ctx context.Context, idt string) error {
@@ -357,8 +365,8 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 	}
 
 	r := newStreamReader(ack.RunID, o.IdleWindow, msgs, out)
-	r.cancelRemote = func() {
-		data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
+	r.cancelRemote = func(reason string) {
+		data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID, Reason: reason})
 		_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
 	}
 
@@ -379,7 +387,7 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 			select {
 			case <-ctx.Done():
 				// Best-effort server-side cancel, then end the local stream.
-				r.cancelRemote()
+				r.cancelRemote("")
 				r.terminate("context cancelled: "+ctx.Err().Error(), "")
 				return
 			case <-dead.C:
@@ -414,7 +422,7 @@ type streamReader struct {
 	watcher      *progress.Watcher
 	idle         <-chan struct{}
 	resetDead    func()
-	cancelRemote func()
+	cancelRemote func(reason string) // best-effort cancel publish
 	// newWatcher builds every watcher of this run (test seam: a manual
 	// clock). beforeObserve, nil outside tests, runs just before Observe.
 	newWatcher    func(time.Duration) *progress.Watcher
@@ -426,7 +434,7 @@ func newStreamReader(runID string, window time.Duration, msgs <-chan *nats.Msg, 
 }
 
 func newStreamReaderWith(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent, newWatcher func(time.Duration) *progress.Watcher) *streamReader {
-	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func() {}, newWatcher: newWatcher}
+	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func(string) {}, newWatcher: newWatcher}
 	if window > 0 {
 		r.watcher = newWatcher(window)
 		r.idle = r.watcher.Expired()
@@ -520,7 +528,7 @@ func (r *streamReader) onIdle() bool {
 			if stage := r.watcher.LastStage(); stage != "" {
 				message += " (last stage: " + stage + ")"
 			}
-			r.cancelRemote()
+			r.cancelRemote(wire.ReasonProgressIdle)
 			r.terminate(message, wire.ReasonProgressIdle)
 			return true
 		}
@@ -532,7 +540,13 @@ func (r *streamReader) onIdle() bool {
 // Returns false (without error) when nothing owns the run — already
 // finished, unknown, or the owner died.
 func (c *Client) Cancel(ctx context.Context, agent, runID string) (bool, error) {
-	data, err := json.Marshal(wire.CancelRequest{RunID: runID})
+	return c.CancelWithReason(ctx, agent, runID, "")
+}
+
+// CancelWithReason is Cancel carrying a cut reason (see Run.CancelWithReason);
+// "" = Cancel.
+func (c *Client) CancelWithReason(ctx context.Context, agent, runID, reason string) (bool, error) {
+	data, err := json.Marshal(wire.CancelRequest{RunID: runID, Reason: reason})
 	if err != nil {
 		return false, err
 	}

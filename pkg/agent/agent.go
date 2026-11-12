@@ -62,9 +62,9 @@ func (t *Turn) ContextLine() string { return t.Context.Line(time.Now()) }
 // ChatHandler runs one streaming chat turn. Emit events through the stream;
 // if the handler returns without emitting a terminal event, the runtime
 // emits done (nil error), error (non-nil), or done/cancelled (run was
-// cancelled); when the run ctx ended by its budget (ErrTimeCap) or by
-// InterruptAll (ErrInterrupted), the fallback is an error event carrying
-// reason time_cap / interrupted. The context is cancelled when the run is
+// cancelled); when the run ctx was cut (CutReason: budget ErrTimeCap,
+// InterruptAll ErrInterrupted, or a cancel carrying a cut reason), the
+// fallback is an error event carrying that reason. The context is cancelled when the run is
 // cancelled or the agent shuts down.
 type ChatHandler func(ctx context.Context, turn *Turn, stream *Stream) error
 
@@ -145,6 +145,41 @@ var ErrTimeCap = errors.New("turn reached its time budget")
 
 // ErrInterrupted is context.Cause of a run ctx cancelled by InterruptAll.
 var ErrInterrupted = errors.New("turn interrupted by shutdown")
+
+// CutError is context.Cause of a run ctx cancelled by a cancel request that
+// carried a known cut reason (wire.Reason*): the caller's limits ended the
+// turn, not the user.
+type CutError struct{ Reason string }
+
+func (e *CutError) Error() string { return "turn cut: " + e.Reason }
+
+// cutReasons are the cancel reasons treated as a cut; any other reason is a
+// plain cancel.
+var cutReasons = map[string]string{ // reason → fallback error text
+	wire.ReasonProgressIdle:  "stopped: no progress",
+	wire.ReasonTokenRotation: "stopped: access could not be renewed",
+	wire.ReasonInterrupted:   "interrupted",
+	wire.ReasonTimeCap:       "time limit reached",
+}
+
+// CutReason is the wire reason for why ctx (a run ctx) was cut: time_cap
+// for ErrTimeCap, interrupted for ErrInterrupted, the reason of a *CutError,
+// else "" (not cut, or cancelled by the user).
+func CutReason(ctx context.Context) string {
+	cause := context.Cause(ctx)
+	var cut *CutError
+	switch {
+	case cause == nil:
+		return ""
+	case errors.Is(cause, ErrTimeCap):
+		return wire.ReasonTimeCap
+	case errors.Is(cause, ErrInterrupted):
+		return wire.ReasonInterrupted
+	case errors.As(cause, &cut):
+		return cut.Reason
+	}
+	return ""
+}
 
 // BudgetMargin is how much earlier than the caller's budget the run ctx
 // ends, so the handler can still send a clean terminal frame.
@@ -446,8 +481,13 @@ func (a *Agent) Start() error {
 		a.mu.Lock()
 		r, ok := a.runs[req.RunID]
 		if ok {
-			r.cancelled = true
-			r.cancel(nil)
+			if _, cut := cutReasons[req.Reason]; cut {
+				// The caller's limits ended the turn: not a user cancel.
+				r.cancel(&CutError{Reason: req.Reason})
+			} else {
+				r.cancelled = true
+				r.cancel(nil)
+			}
 		}
 		a.mu.Unlock()
 		if ok && msg.Reply != "" {
@@ -686,11 +726,14 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 			// handler already ended the run
 		case wasCancelled:
 			stream.Done(wire.StopCancelled, nil)
-		case errors.Is(context.Cause(ctx), ErrInterrupted):
-			stream.ErrorWithReason("interrupted", wire.CodeInternal, wire.ReasonInterrupted)
-		case errors.Is(context.Cause(ctx), ErrTimeCap):
-			// Fixed text: the handler's raw error is not shown to callers.
-			stream.ErrorWithReason("time limit reached", wire.CodeInternal, wire.ReasonTimeCap)
+		case CutReason(ctx) != "":
+			// Fixed text per reason: the handler's raw error is not shown.
+			reason := CutReason(ctx)
+			text, ok := cutReasons[reason]
+			if !ok {
+				text = "turn cut: " + reason
+			}
+			stream.ErrorWithReason(text, wire.CodeInternal, reason)
 		case err != nil:
 			stream.Error(err.Error(), wire.CodeInternal)
 		default:

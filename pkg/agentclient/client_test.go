@@ -72,6 +72,7 @@ type fakeAgent struct {
 	mu      sync.Mutex
 	idts    []string
 	cancels chan string
+	reasons chan string // reason of each cancel, same order as cancels
 }
 
 var agentSeq atomic.Int64
@@ -85,6 +86,7 @@ func startFakeAgent(t *testing.T, caps *wire.AckCaps, script func(publish func(w
 		caps:    caps,
 		script:  script,
 		cancels: make(chan string, 4),
+		reasons: make(chan string, 4),
 	}
 	const runID = "run-1"
 	if _, err := nc.Subscribe(wire.AgentSubject(f.name, "chat"), func(m *nats.Msg) {
@@ -110,6 +112,7 @@ func startFakeAgent(t *testing.T, caps *wire.AckCaps, script func(publish func(w
 	if _, err := nc.Subscribe(wire.AgentSubject(f.name, "cancel"), func(m *nats.Msg) {
 		var req wire.CancelRequest
 		_ = json.Unmarshal(m.Data, &req)
+		f.reasons <- req.Reason
 		f.cancels <- req.RunID
 	}); err != nil {
 		t.Fatalf("subscribe cancel: %v", err)
@@ -623,7 +626,7 @@ func newClockReader(t *testing.T) (r *streamReader, fc *progressclock.Fake, msgs
 	r = newStreamReaderWith("run-1", readerWindow, msgs, out, func(w time.Duration) *progress.Watcher {
 		return progressclock.NewWatcher(w, fc).(*progress.Watcher)
 	})
-	r.cancelRemote = func() { cancels.Add(1) }
+	r.cancelRemote = func(string) { cancels.Add(1) }
 	t.Cleanup(r.stop)
 	return r, fc, msgs, out, cancels
 }
@@ -771,5 +774,49 @@ func TestProgressAtWindowEdgeRevives(t *testing.T) {
 	}
 	if cancels.Load() != 0 {
 		t.Fatalf("cancels = %d", cancels.Load())
+	}
+}
+
+// The client's own idle cut tells the agent why: reason progress_idle.
+func TestClientIdleCutSendsReason(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) { pingsUntil(stop, publish) })
+	run, err := NewFromConn(testConn(t)).ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: 200 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	drain(t, run, 5*time.Second)
+	select {
+	case reason := <-f.reasons:
+		if reason != wire.ReasonProgressIdle {
+			t.Fatalf("cancel reason = %q, want progress_idle", reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no cancel published on idle cut")
+	}
+}
+
+func TestCancelWithReasonSendsReason(t *testing.T) {
+	f := startFakeAgent(t, nil, nil)
+	c := NewFromConn(testConn(t))
+	if _, err := c.CancelWithReason(context.Background(), f.name, "run-1", wire.ReasonTokenRotation); err != nil {
+		t.Fatalf("CancelWithReason: %v", err)
+	}
+	if r := <-f.reasons; r != wire.ReasonTokenRotation {
+		t.Fatalf("reason = %q", r)
+	}
+	run := &Run{Ack: wire.ChatAck{RunID: "run-1"}, client: c, agent: f.name}
+	if _, err := run.CancelWithReason(context.Background(), wire.ReasonInterrupted); err != nil {
+		t.Fatalf("Run.CancelWithReason: %v", err)
+	}
+	if r := <-f.reasons; r != wire.ReasonInterrupted {
+		t.Fatalf("reason = %q", r)
+	}
+	if _, err := run.Cancel(context.Background()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if r := <-f.reasons; r != "" {
+		t.Fatalf("plain Cancel sent reason %q", r)
 	}
 }

@@ -151,3 +151,19 @@ func TestStoredMessageIncomplete(t *testing.T) {
 		t.Fatalf("round trip = %+v %v", out, err)
 	}
 }
+
+func TestCancelRequestReasonCompat(t *testing.T) {
+	var old CancelRequest
+	if err := json.Unmarshal([]byte(`{"runId":"run_1"}`), &old); err != nil || old.RunID != "run_1" || old.Reason != "" {
+		t.Fatalf("old cancel = %+v %v", old, err)
+	}
+	data, _ := json.Marshal(CancelRequest{RunID: "run_1"})
+	if string(data) != `{"runId":"run_1"}` {
+		t.Fatalf("plain cancel = %s, want old shape", data)
+	}
+	data, _ = json.Marshal(CancelRequest{RunID: "run_1", Reason: ReasonProgressIdle})
+	var back CancelRequest
+	if err := json.Unmarshal(data, &back); err != nil || back.Reason != ReasonProgressIdle {
+		t.Fatalf("round trip %s → %+v %v", data, back, err)
+	}
+}

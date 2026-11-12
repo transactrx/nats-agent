@@ -634,6 +634,14 @@ Stored history messages (`sessionsGet` `messages[]`, §7) may carry
 short (a value above, or `error`). Optional; clients that ignore it show the
 partial text as before.
 
+A cancel request (§5.4) may carry an optional `reason`:
+`{ "runId": "run_01HZY...", "reason": "progress_idle" }`. A known cut reason
+(`progress_idle`, `token_rotation_failed`, `interrupted`, `time_cap`) means
+the caller's limits ended the turn: a 1.5 agent ends the run with an `error`
+event carrying that `reason` (so it can keep its partial work) instead of
+`done`/`cancelled`. Empty or unknown `reason` = a plain cancel, as before.
+The cancel reply is unchanged.
+
 ### 12.6 Token rotation (non-normative)
 
 A caller holding a short-lived token schedules the next rotation from the

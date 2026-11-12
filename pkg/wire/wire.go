@@ -291,6 +291,10 @@ func (e *AgentEvent) IsTerminal() bool {
 
 type CancelRequest struct {
 	RunID string `json:"runId"`
+	// Reason (v1.5, optional) marks the cancel as a cut by the caller's
+	// limits (ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
+	// ReasonTimeCap). Empty or unknown = a plain (user) cancel.
+	Reason string `json:"reason,omitempty"`
 }
 
 type CancelResponse struct {
