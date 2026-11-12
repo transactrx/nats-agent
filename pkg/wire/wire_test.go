@@ -125,3 +125,29 @@ func TestIsProgress(t *testing.T) {
 		}
 	}
 }
+
+func TestStoredMessageIncomplete(t *testing.T) {
+	data, err := json.Marshal(StoredMessage{Role: "assistant", Content: []ContentBlock{{Text: "partial"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"incomplete"`) {
+		t.Fatalf("complete message carries incomplete: %s", data)
+	}
+	var old StoredMessage
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":[{"text":"x"}],"timestamp":"2026-11-12T10:00:00Z"}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Incomplete != "" {
+		t.Fatalf("old JSON Incomplete = %q", old.Incomplete)
+	}
+	in := StoredMessage{Role: "assistant", Content: []ContentBlock{{Text: "partial"}}, Incomplete: ReasonTimeCap}
+	data, _ = json.Marshal(in)
+	if !strings.Contains(string(data), `"incomplete":"time_cap"`) {
+		t.Fatalf("marshal = %s", data)
+	}
+	var out StoredMessage
+	if err := json.Unmarshal(data, &out); err != nil || out.Incomplete != ReasonTimeCap {
+		t.Fatalf("round trip = %+v %v", out, err)
+	}
+}

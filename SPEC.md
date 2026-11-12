@@ -629,6 +629,11 @@ ended the turn. Clients ignore unknown values.
 | `subagent_idle` | A consulted agent stopped making progress |
 | `token_rotation_failed` | No fresh token could be delivered before the current one ran low |
 
+Stored history messages (`sessionsGet` `messages[]`, §7) may carry
+`incomplete`: absent for a complete message, otherwise the reason it was cut
+short (a value above, or `error`). Optional; clients that ignore it show the
+partial text as before.
+
 ### 12.6 Token rotation (non-normative)
 
 A caller holding a short-lived token schedules the next rotation from the

@@ -322,6 +322,10 @@ type StoredMessage struct {
 	Role      string         `json:"role"`
 	Content   []ContentBlock `json:"content"`
 	Timestamp string         `json:"timestamp,omitempty"` // RFC 3339
+	// Incomplete (v1.5) is empty for a complete message; otherwise the
+	// reason the message was cut short (a Reason* value, e.g. time_cap,
+	// interrupted, or "error"). Optional; older peers ignore it.
+	Incomplete string `json:"incomplete,omitempty"`
 }
 
 type SessionsListRequest struct {
