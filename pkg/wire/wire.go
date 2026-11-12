@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.4"
+const ProtocolVersion = "1.5"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -127,6 +127,12 @@ type Capabilities struct {
 	// UserContext (v1.3): the agent reads ChatRequest.context (user's time
 	// zone and name) and answers in the user's local time.
 	UserContext bool `json:"userContext,omitempty"`
+	// Progress (v1.5): the agent emits progress data events and honors
+	// ChatRequest.budget, so callers may cut a turn on progress idleness.
+	Progress bool `json:"progress,omitempty"`
+	// Renew (v1.5): the agent accepts a fresh IDT mid-run on the ack's
+	// caps.renewSubject.
+	Renew bool `json:"renew,omitempty"`
 }
 
 // AgentAccess maps an agent onto the identity model: an agent IS an
@@ -161,6 +167,20 @@ type ChatRequest struct {
 	// Context (v1.3) is display-only user context (time zone, name, locale).
 	// Never authorization. Agents read it normalized (see UserContext).
 	Context *UserContext `json:"context,omitempty"`
+	// Budget (v1.5) is the time the caller still allows this turn. Absent =
+	// the agent's own limits apply.
+	Budget *Budget `json:"budget,omitempty"`
+}
+
+// Budget (v1.5) carries the caller's remaining time for a turn.
+type Budget struct {
+	RemainingMs int64 `json:"remainingMs"`
+}
+
+// AckCaps (v1.5) tells the caller what this run of the agent supports.
+type AckCaps struct {
+	Progress     bool   `json:"progress,omitempty"`
+	RenewSubject string `json:"renewSubject,omitempty"` // where RenewRequest goes
 }
 
 type ChatAck struct {
@@ -170,6 +190,8 @@ type ChatAck struct {
 	Agent         string `json:"agent"`
 	InstanceID    string `json:"instanceId"`
 	StreamSubject string `json:"streamSubject"`
+	// Caps (v1.5) is absent on older agents.
+	Caps *AckCaps `json:"caps,omitempty"`
 }
 
 // Event types published to the stream subject.
@@ -192,6 +214,41 @@ const (
 	StopCancelled     = "cancelled"
 	StopMaxIterations = "maxIterations"
 )
+
+// Cut reasons (v1.5) carried by AgentEvent.Reason on done/error events when a
+// turn was ended by a limit rather than by the model.
+const (
+	ReasonTimeCap         = "time_cap"
+	ReasonProgressIdle    = "progress_idle"
+	ReasonInterrupted     = "interrupted"
+	ReasonMaxIterations   = "max_iterations"
+	ReasonSubagentTimeout = "subagent_timeout"
+	ReasonSubagentIdle    = "subagent_idle"
+	ReasonTokenRotation   = "token_rotation_failed"
+)
+
+// DataKindProgress (v1.5) is the data event kind whose payload is a
+// ProgressPayload.
+const DataKindProgress = "progress"
+
+// ProgressPayload (v1.5) is the payload of a data event of kind "progress".
+type ProgressPayload struct {
+	Stage  string `json:"stage"`
+	Source string `json:"source,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// RenewRequest (v1.5) hands a running turn a fresh IDT.
+type RenewRequest struct {
+	RunID       string `json:"runId"`
+	IDT         string `json:"idt"`
+	ExpiresAtMs int64  `json:"expiresAtMs,omitempty"` // expiry of the new token, unix ms
+}
+
+type RenewResponse struct {
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"`
+}
 
 type AgentEvent struct {
 	RunID string `json:"runId"`
@@ -217,6 +274,14 @@ type AgentEvent struct {
 
 	Error       string `json:"error,omitempty"`       // error
 	ErrorStatus int    `json:"errorStatus,omitempty"` // error, §9 code
+
+	Reason string `json:"reason,omitempty"` // done, error (v1.5 cut reason)
+}
+
+// IsProgress reports whether this event shows the run is making progress.
+// Every event counts except pings, which only prove liveness.
+func (e *AgentEvent) IsProgress() bool {
+	return e.Type != EventPing
 }
 
 // IsTerminal reports whether this event ends the run.
