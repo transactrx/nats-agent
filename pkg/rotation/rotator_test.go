@@ -19,7 +19,8 @@ type fakeClock struct {
 
 type waiter struct {
 	at time.Time
-	ch chan time.Time
+	ch chan time.Time // After waiter
+	fn func()         // AfterFunc waiter (attempt bounds); not counted by pending
 }
 
 var t0 = time.Unix(1_000_000, 0)
@@ -44,10 +45,53 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return ch
 }
 
+func (c *fakeClock) AfterFunc(d time.Duration, f func()) func() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := &waiter{at: c.now.Add(d), fn: f}
+	if d <= 0 {
+		go f()
+		return func() bool { return false }
+	}
+	c.waiters = append(c.waiters, w)
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for i, x := range c.waiters {
+			if x == w {
+				c.waiters = append(c.waiters[:i], c.waiters[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// pending counts After waiters (sleeps), not AfterFunc bounds.
 func (c *fakeClock) pending() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.waiters)
+	n := 0
+	for _, w := range c.waiters {
+		if w.fn == nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *fakeClock) pendingFuncs() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.waiters) - func() int {
+		n := 0
+		for _, w := range c.waiters {
+			if w.fn == nil {
+				n++
+			}
+		}
+		return n
+	}()
 }
 
 // Advance moves the clock by d and fires every waiter now due.
@@ -61,16 +105,26 @@ func (c *fakeClock) Advance(d time.Duration) {
 			kept = append(kept, w)
 			continue
 		}
+		if w.fn != nil {
+			go w.fn()
+			continue
+		}
 		w.ch <- c.now
 	}
 	c.waiters = kept
 }
 
-// fireNext advances to the earliest pending deadline.
+// fireNext advances to the earliest pending After deadline.
 func (c *fakeClock) fireNext() {
 	c.mu.Lock()
 	sort.Slice(c.waiters, func(i, j int) bool { return c.waiters[i].at.Before(c.waiters[j].at) })
-	d := c.waiters[0].at.Sub(c.now)
+	var d time.Duration
+	for _, w := range c.waiters {
+		if w.fn == nil {
+			d = w.at.Sub(c.now)
+			break
+		}
+	}
 	c.mu.Unlock()
 	c.Advance(d)
 }
@@ -420,5 +474,146 @@ func TestFirstWithoutExpiry(t *testing.T) {
 	err := Run(context.Background(), h.cfg, Token{Value: "tok0"})
 	if err == nil {
 		t.Fatal("Run accepted a first token without expiry")
+	}
+}
+
+// A Redeem that hangs is cut at the give-up point; Run fails then instead
+// of blocking past it.
+func TestHungRedeemGivesUp(t *testing.T) {
+	h := newHarness(t, 15*time.Minute, 0, 0)
+	ctxErr := make(chan error, 1)
+	h.cfg.Redeem = func(ctx context.Context, ttl time.Duration) (Token, error) {
+		<-ctx.Done()
+		ctxErr <- ctx.Err()
+		return Token{}, ctx.Err()
+	}
+	h.start(firstToken())
+	waitPending(t, h.clock, 1, h.done)
+	h.clock.Advance(7 * time.Minute)
+	deadline := time.Now().Add(2 * time.Second)
+	for h.clock.pendingFuncs() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	h.clock.Advance(6 * time.Minute) // reach expiry - GiveUpBefore
+	select {
+	case <-h.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run still blocked in a hung Redeem past the give-up point")
+	}
+	if !errors.Is(h.err, ErrRotationFailed) {
+		t.Fatalf("Run = %v, want ErrRotationFailed", h.err)
+	}
+	if err := <-ctxErr; err == nil {
+		t.Fatal("Redeem ctx not ended")
+	}
+	if got := h.clock.Now().Sub(t0); got != 13*time.Minute {
+		t.Fatalf("gave up at %v, want 13m", got)
+	}
+}
+
+// Run returns only after a Retire in progress has finished; a retire whose
+// overlap has not elapsed is dropped.
+func TestRunWaitsForRetires(t *testing.T) {
+	h := newHarness(t, 60*time.Minute, 0, 0)
+	h.cfg.Overlap = 8 * time.Minute
+	started := make(chan Token, 4)
+	release := make(chan struct{})
+	h.cfg.Retire = func(ctx context.Context, old Token) {
+		started <- old
+		<-release
+	}
+	h.start(firstToken())
+	waitPending(t, h.clock, 1, h.done)
+	h.clock.Advance(7 * time.Minute) // rotate tok0 → tok1
+	h.waitPushed()
+	waitPending(t, h.clock, 2, h.done)
+	h.clock.Advance(8 * time.Minute) // tok0 overlap ends
+	select {
+	case old := <-started:
+		if old.Value != "tok0" {
+			t.Fatalf("retiring %q, want tok0", old.Value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Retire not started")
+	}
+	waitPending(t, h.clock, 1, h.done)
+	h.clock.Advance(44 * time.Minute) // 59m: rotate tok1 → tok2
+	h.waitPushed()
+	waitPending(t, h.clock, 2, h.done) // next rotation + tok1 retire (67m)
+
+	h.cancel()
+	select {
+	case <-h.done:
+		t.Fatal("Run returned while a Retire was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-h.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the Retire finished")
+	}
+	if h.err != nil {
+		t.Fatalf("Run = %v", h.err)
+	}
+	select {
+	case old := <-started:
+		t.Fatalf("pending retire of %q not dropped", old.Value)
+	default:
+	}
+}
+
+// On give-up, a token that was redeemed but never delivered is retired once.
+func TestGiveUpRetiresUndeliveredToken(t *testing.T) {
+	h := newHarness(t, 15*time.Minute, 0, -1)
+	var mu sync.Mutex
+	var retired []Token
+	h.cfg.Retire = func(ctx context.Context, old Token) {
+		mu.Lock()
+		retired = append(retired, old)
+		mu.Unlock()
+	}
+	h.start(firstToken())
+	for waitPending(t, h.clock, 1, h.done) {
+		h.clock.fireNext()
+	}
+	if !errors.Is(h.err, ErrRotationFailed) {
+		t.Fatalf("Run = %v, want ErrRotationFailed", h.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(retired) != 1 || retired[0].Value != "tok1" {
+		t.Fatalf("retired %+v, want the undelivered tok1 once", retired)
+	}
+	if redeems, _, _, _, _ := h.rec.snapshot(); len(redeems) != 1 {
+		t.Fatalf("redeems = %v, want one", redeems)
+	}
+}
+
+func TestInvalidConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mod  func(*Config)
+	}{
+		{"nil Redeem", func(c *Config) { c.Redeem = nil }},
+		{"nil Push", func(c *Config) { c.Push = nil }},
+		{"RotateBefore == GiveUpBefore", func(c *Config) { c.GiveUpBefore = c.RotateBefore }},
+		{"RotateBefore < GiveUpBefore", func(c *Config) { c.RotateBefore = time.Minute }},
+		{"negative GiveUpBefore", func(c *Config) { c.GiveUpBefore = -time.Second }},
+		{"zero TTL", func(c *Config) { c.TTL = 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, 15*time.Minute, 0, 0)
+			tc.mod(&h.cfg)
+			h.start(firstToken())
+			select {
+			case <-h.done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not reject the config immediately")
+			}
+			if h.err == nil || errors.Is(h.err, ErrRotationFailed) {
+				t.Fatalf("Run = %v, want a config error", h.err)
+			}
+		})
 	}
 }
