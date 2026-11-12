@@ -441,3 +441,80 @@ func TestIDTSourceToolCall(t *testing.T) {
 		t.Fatalf("tool headers seen = %v", seen)
 	}
 }
+
+// When the idle window expires while frames are still queued (the consumer
+// was slow), the queued frames win: they are delivered in order and a
+// queued terminal ends the run normally, with no idle cut and no cancel.
+func TestIdleExpiryPrefersQueuedTerminal(t *testing.T) {
+	const texts = 80 // more than the Events buffer, so the reader blocks
+	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+		for i := 0; i < texts; i++ {
+			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
+		}
+		publish(wire.AgentEvent{Type: wire.EventDone, StopReason: wire.StopEndTurn})
+	})
+	c := NewFromConn(testConn(t))
+	const window = 200 * time.Millisecond
+	run, err := c.ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: window})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	time.Sleep(3 * window) // nobody reads: the watcher expires with frames queued
+	evs := drain(t, run, 5*time.Second)
+	if len(evs) != texts+1 {
+		t.Fatalf("got %d events, want %d texts + done; last = %+v", len(evs), texts, evs[len(evs)-1])
+	}
+	for i := 0; i < texts; i++ {
+		if evs[i].Type != wire.EventText || evs[i].TextDelta != fmt.Sprint(i) {
+			t.Fatalf("event %d = %+v, want text %d in order", i, evs[i], i)
+		}
+	}
+	if last := evs[texts]; last.Type != wire.EventDone || last.Reason != "" {
+		t.Fatalf("terminal = %+v, want the agent's done", last)
+	}
+	select {
+	case id := <-f.cancels:
+		t.Fatalf("cancel %q published although the run ended normally", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestRenewTransportError(t *testing.T) {
+	// No responders.
+	err := Renew(context.Background(), testConn(t), nats.NewInbox(), wire.RenewRequest{RunID: "r", IDT: "tok"})
+	if !errors.Is(err, ErrRenewTransport) || !errors.Is(err, nats.ErrNoResponders) {
+		t.Fatalf("no responders: %v, want ErrRenewTransport wrapping ErrNoResponders", err)
+	}
+	if errors.Is(err, ErrRenewRejected) || errors.Is(err, ErrRenewUnsupported) {
+		t.Fatalf("transport error matches another sentinel: %v", err)
+	}
+	// Connection error.
+	nc := testConn(t)
+	nc.Close()
+	err = Renew(context.Background(), nc, nats.NewInbox(), wire.RenewRequest{RunID: "r", IDT: "tok"})
+	if !errors.Is(err, ErrRenewTransport) || !errors.Is(err, nats.ErrConnectionClosed) {
+		t.Fatalf("closed conn: %v, want ErrRenewTransport wrapping ErrConnectionClosed", err)
+	}
+	// Caller cancelled: the ctx error, not the sentinel.
+	subject := nats.NewInbox()
+	silent := testConn(t)
+	if _, err := silent.Subscribe(subject, func(*nats.Msg) {}); err != nil {
+		t.Fatal(err)
+	}
+	_ = silent.Flush()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	err = Renew(ctx, testConn(t), subject, wire.RenewRequest{RunID: "r", IDT: "tok"})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrRenewTransport) {
+		t.Fatalf("cancelled ctx: %v, want context.Canceled without ErrRenewTransport", err)
+	}
+	// Rejected and unsupported unchanged.
+	if err := Renew(context.Background(), testConn(t), "", wire.RenewRequest{}); !errors.Is(err, ErrRenewUnsupported) || errors.Is(err, ErrRenewTransport) {
+		t.Fatalf("unsupported: %v", err)
+	}
+	rs := nats.NewInbox()
+	renewResponder(t, rs, wire.RenewResponse{Applied: false, Reason: "wrong_run"})
+	if err := Renew(context.Background(), testConn(t), rs, wire.RenewRequest{}); !errors.Is(err, ErrRenewRejected) || errors.Is(err, ErrRenewTransport) {
+		t.Fatalf("rejected: %v", err)
+	}
+}

@@ -40,6 +40,10 @@ var (
 	// wrapping error carries the agent's reason. Transport failures (no
 	// responders, timeout) are returned as other errors so callers can retry.
 	ErrRenewRejected = errors.New("agentclient: renew rejected")
+	// ErrRenewTransport: the renew got no reply (no responders, timeout,
+	// connection error); the wrapping error also carries the cause. The
+	// token was not applied; retrying may help.
+	ErrRenewTransport = errors.New("agentclient: renew transport error")
 )
 
 // ServiceError is a protocol-level error reply from an agent (§9 envelope).
@@ -273,7 +277,8 @@ func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Ti
 // Renew sends req to a run's renew subject (ChatAck.Caps.RenewSubject), for
 // callers that hold the subject without a Run. Empty subject →
 // ErrRenewUnsupported; refused → ErrRenewRejected wrapping the reason; no
-// reply within RenewTimeout (or ctx) → a wrapped transport error.
+// reply within RenewTimeout → ErrRenewTransport wrapping the cause; ctx
+// ended → the ctx error.
 func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewRequest) error {
 	if subject == "" {
 		return ErrRenewUnsupported
@@ -286,7 +291,10 @@ func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewReq
 	defer cancel()
 	msg, err := nc.RequestWithContext(rctx, subject, data)
 	if err != nil {
-		return fmt.Errorf("renew request to %s: %w", subject, err)
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("renew request to %s: %w", subject, cerr)
+		}
+		return fmt.Errorf("%w: renew request to %s: %w", ErrRenewTransport, subject, err)
 	}
 	var resp wire.RenewResponse
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
@@ -367,6 +375,17 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 				Error: message, ErrorStatus: wire.CodeUpstream, Reason: reason,
 			}
 		}
+		// accept decodes a stream frame; false for garbage and stray runs.
+		accept := func(m *nats.Msg) (wire.AgentEvent, bool) {
+			var ev wire.AgentEvent
+			if err := json.Unmarshal(m.Data, &ev); err != nil {
+				return ev, false
+			}
+			if ev.RunID != "" && ev.RunID != ack.RunID {
+				return ev, false // stray traffic on a shared stream subject
+			}
+			return ev, true
+		}
 		cancelRemote := func() {
 			data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
 			_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
@@ -383,6 +402,25 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 				terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout), "")
 				return
 			case <-idle:
+				// Frames already queued win over the cut (a slow reader
+				// is not an idle agent): deliver them in order, and end
+				// normally if one is terminal.
+			drained:
+				for {
+					select {
+					case m := <-msgs:
+						ev, ok := accept(m)
+						if !ok || ev.Type == wire.EventPing {
+							continue
+						}
+						out <- ev
+						if ev.IsTerminal() {
+							return
+						}
+					default:
+						break drained
+					}
+				}
 				message := fmt.Sprintf("run idle: no progress for %s", o.IdleWindow)
 				if stage := watcher.LastStage(); stage != "" {
 					message += " (last stage: " + stage + ")"
@@ -391,12 +429,9 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 				terminate(message, wire.ReasonProgressIdle)
 				return
 			case m := <-msgs:
-				var ev wire.AgentEvent
-				if err := json.Unmarshal(m.Data, &ev); err != nil {
+				ev, ok := accept(m)
+				if !ok {
 					continue
-				}
-				if ev.RunID != "" && ev.RunID != ack.RunID {
-					continue // stray traffic on a shared stream subject
 				}
 				if !dead.Stop() {
 					<-dead.C
