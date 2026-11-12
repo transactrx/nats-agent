@@ -164,7 +164,8 @@ func WithIDT(ctx context.Context, idt string) context.Context {
 // call, so a long turn picks up a renewed token for its next request. It
 // applies to everything that reads the token from ctx (Chat, Invoke,
 // Sessions*, toolclient runs). When src returns "" the WithIDT value is used.
-// nil src is a no-op.
+// A WithIDT/WithToken set on a derived context does not override the
+// source. nil src is a no-op.
 func WithIDTSource(ctx context.Context, src func() string) context.Context {
 	return idtpkg.WithTokenSource(ctx, src)
 }
@@ -243,6 +244,8 @@ func (c *Client) Ping(ctx context.Context, agent string) (*wire.PingResponse, er
 // Run is one live chat turn: the ack plus the event stream. The Events
 // channel closes after the terminal event (which is always delivered last).
 // Transport pings are consumed internally for liveness and not delivered.
+// Events must be drained until the terminal event: the reader goroutine
+// blocks on a full channel.
 type Run struct {
 	Ack    wire.ChatAck
 	Events <-chan wire.AgentEvent

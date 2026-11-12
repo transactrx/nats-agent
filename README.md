@@ -78,9 +78,10 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 ### Long turns (protocol 1.5)
 
 Adopting 1.5: bumping the library changes nothing until you set
-`Config.Progress`/`Config.Renew`. The one exception is a caller that sends
-`budget`: the handler ctx then gets a deadline (`remainingMs` − 5s, cause
-`agent.ErrTimeCap`).
+`Config.Progress`/`Config.Renew`, with one exception: a request `budget` is
+honoured even without opt-in — the handler ctx gets a deadline
+(`remainingMs` − 5s, cause `agent.ErrTimeCap`) and the turn may end with
+`reason: "time_cap"`.
 
 - `Config.Progress: true` — call `stream.Progress(stage, detail)` on real
   work (model output, tool start/end); at most one frame per 15s is sent.

@@ -646,4 +646,6 @@ when the current token has 8 min left, and retries with backoff (5 s, 10 s,
   renew, the first token for the whole turn).
 - A v1.4 caller ignores `caps`, the `progress` data kind (unknown kinds are
   ignored, §5.3) and `reason`; it never sends `budget` or renews.
-- Agents emit nothing new until they opt in (`progress` / `renew`).
+- An agent on 1.5 that has not opted in still honours a request `budget`
+  and may end a turn with `reason:"time_cap"`; everything else (`caps`,
+  progress frames, renew, other reasons) is emitted only after opt-in.

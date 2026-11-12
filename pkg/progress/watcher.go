@@ -26,7 +26,8 @@ func (realClock) Now() time.Time { return time.Now() }
 func (realClock) AfterFunc(d time.Duration, f func()) timer { return time.AfterFunc(d, f) }
 
 // Watcher closes Expired once no progress has been seen for the window. It is
-// safe for concurrent use. Call Stop when the run ends.
+// safe for concurrent use. Call Stop when the run ends; read Idle and
+// LastStage before Stop.
 type Watcher struct {
 	window  time.Duration
 	clock   clock

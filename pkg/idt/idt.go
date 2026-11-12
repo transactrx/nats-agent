@@ -353,8 +353,8 @@ type tokenSourceCtxKey struct{}
 // WithTokenSource returns a context whose token is read from src at call
 // time, so a long-lived context follows a token that is renewed while it is
 // in use. TokenFromContext (and so every authenticated call) asks src first
-// and falls back to the WithToken value when src returns "". nil src is a
-// no-op.
+// and falls back to the WithToken value when src returns "". A WithToken set
+// on a derived context does not override the source. nil src is a no-op.
 func WithTokenSource(ctx context.Context, src func() string) context.Context {
 	if src == nil {
 		return ctx
