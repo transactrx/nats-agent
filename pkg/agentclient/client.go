@@ -321,8 +321,10 @@ func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewReq
 // ChatOptions tunes one chat turn. The zero value behaves exactly as Chat.
 type ChatOptions struct {
 	// IdleWindow > 0 cuts the run when no progress (any event but a ping)
-	// arrives for this long: the client publishes a best-effort cancel and
-	// ends the stream with an error event, Reason wire.ReasonProgressIdle.
+	// arrives for this long: the client publishes a best-effort cancel
+	// (reason progress_idle) and ends the stream with an error event,
+	// Reason wire.ReasonProgressIdle. It applies only to agents whose ack
+	// declares progress (Caps.Progress); for others it is ignored.
 	// 0 = no idle cut.
 	IdleWindow time.Duration
 }
@@ -364,7 +366,13 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 		run.Caps = *ack.Caps
 	}
 
-	r := newStreamReader(ack.RunID, o.IdleWindow, msgs, out)
+	// The no-progress cut applies only to agents that declared progress;
+	// others promised pings only and run exactly as with Chat.
+	window := o.IdleWindow
+	if !run.Caps.Progress {
+		window = 0
+	}
+	r := newStreamReader(ack.RunID, window, msgs, out)
 	r.cancelRemote = func(reason string) {
 		data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID, Reason: reason})
 		_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)

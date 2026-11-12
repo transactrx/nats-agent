@@ -129,6 +129,10 @@ func (f *fakeAgent) seenIDTs() []string {
 	return append([]string(nil), f.idts...)
 }
 
+// progressCaps is the ack of an agent that declares progress (needed for
+// the client's idle cut).
+var progressCaps = &wire.AckCaps{Progress: true}
+
 func chatReq() wire.ChatRequest {
 	return wire.ChatRequest{Message: wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}}
 }
@@ -168,7 +172,7 @@ func drain(t *testing.T, run *Run, within time.Duration) []wire.AgentEvent {
 func TestChatWithIdleCut(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) { pingsUntil(stop, publish) })
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) { pingsUntil(stop, publish) })
 	c := NewFromConn(testConn(t))
 
 	const window = 300 * time.Millisecond
@@ -205,7 +209,7 @@ func TestChatWithIdleCut(t *testing.T) {
 func TestChatWithIdleCutNamesStage(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) {
 		payload, _ := json.Marshal(wire.ProgressPayload{Stage: "searching"})
 		publish(wire.AgentEvent{Type: wire.EventData, Kind: wire.DataKindProgress, Payload: payload})
 		pingsUntil(stop, publish)
@@ -225,7 +229,7 @@ func TestChatWithIdleCutNamesStage(t *testing.T) {
 
 func TestChatWithIdleExtendsOnProgress(t *testing.T) {
 	const window = 200 * time.Millisecond
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) {
 		// Progress every 80ms for 3x the window, pings in between, then done.
 		end := time.Now().Add(3 * window)
 		for time.Now().Before(end) {
@@ -452,7 +456,7 @@ func TestIDTSourceToolCall(t *testing.T) {
 // queued terminal ends the run normally, with no idle cut and no cancel.
 func TestIdleExpiryPrefersQueuedTerminal(t *testing.T) {
 	const texts = 80 // more than the Events buffer, so the reader blocks
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) {
 		for i := 0; i < texts; i++ {
 			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
 		}
@@ -529,7 +533,7 @@ func TestRenewTransportError(t *testing.T) {
 func TestIdleExpiryQueuedProgressEndToEnd(t *testing.T) {
 	const texts = 80 // more than the Events buffer, so the reader blocks
 	sendDone := make(chan struct{})
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) {
 		for i := 0; i < texts; i++ {
 			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
 		}
@@ -581,7 +585,7 @@ func TestIdleExpiryWithOnlyQueuedPingsCuts(t *testing.T) {
 	const texts = 65 // the reader blocks on the last one
 	stop := make(chan struct{})
 	defer close(stop)
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) {
 		for i := 0; i < texts; i++ {
 			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
 		}
@@ -781,7 +785,7 @@ func TestProgressAtWindowEdgeRevives(t *testing.T) {
 func TestClientIdleCutSendsReason(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
-	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) { pingsUntil(stop, publish) })
+	f := startFakeAgent(t, progressCaps, func(publish func(wire.AgentEvent)) { pingsUntil(stop, publish) })
 	run, err := NewFromConn(testConn(t)).ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("chat: %v", err)
@@ -818,5 +822,33 @@ func TestCancelWithReasonSendsReason(t *testing.T) {
 	}
 	if r := <-f.reasons; r != "" {
 		t.Fatalf("plain Cancel sent reason %q", r)
+	}
+}
+
+// An agent whose ack does not declare progress only promised pings: the
+// idle window is ignored for its run (as plain Chat).
+func TestIdleWindowIgnoredWithoutProgressCap(t *testing.T) {
+	for _, caps := range []*wire.AckCaps{nil, {RenewSubject: "_RENEW.x"}} {
+		stop := make(chan struct{})
+		f := startFakeAgent(t, caps, func(publish func(wire.AgentEvent)) {
+			pingsUntil(stop, publish)
+			publish(wire.AgentEvent{Type: wire.EventDone, StopReason: wire.StopEndTurn})
+		})
+		const window = 150 * time.Millisecond
+		run, err := NewFromConn(testConn(t)).ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: window})
+		if err != nil {
+			t.Fatalf("chat: %v", err)
+		}
+		time.Sleep(4 * window)
+		close(stop)
+		evs := drain(t, run, 5*time.Second)
+		if len(evs) != 1 || evs[0].Type != wire.EventDone {
+			t.Fatalf("caps %+v: events = %+v, want only the agent's done (no idle cut)", caps, evs)
+		}
+		select {
+		case id := <-f.cancels:
+			t.Fatalf("caps %+v: cancel %q published", caps, id)
+		default:
+		}
 	}
 }
