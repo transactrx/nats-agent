@@ -8,6 +8,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,7 +88,14 @@ type Config struct {
 	// UserContext advertises capability "userContext": this agent reads the
 	// user's time zone and name (Turn.ContextLine) and answers in local time.
 	UserContext bool
-	Metadata    map[string]any
+	// Progress (opt-in) advertises capability "progress": Stream.Progress
+	// publishes progress frames and ChatRequest.budget is honored by
+	// callers' idle rules. Default false = today's behavior.
+	Progress bool
+	// Renew (opt-in) advertises capability "renew": the agent accepts a
+	// fresh IDT mid-run. Default false = today's behavior.
+	Renew    bool
+	Metadata map[string]any
 
 	// Access registers this agent with the identity model (card "access").
 	// nil → read APP_ID / APP_FUNCTION_ID from the environment.
@@ -123,8 +131,49 @@ type Agent struct {
 }
 
 type run struct {
-	cancel    context.CancelFunc
+	cancel    context.CancelCauseFunc
 	cancelled bool
+}
+
+// ErrTimeCap is context.Cause of a run ctx whose ChatRequest.budget ran out.
+var ErrTimeCap = errors.New("turn reached its time budget")
+
+// ErrInterrupted is context.Cause of a run ctx cancelled by InterruptAll.
+var ErrInterrupted = errors.New("turn interrupted by shutdown")
+
+// BudgetMargin is how much earlier than the caller's budget the run ctx
+// ends, so the handler can still send a clean terminal frame.
+const BudgetMargin = 5 * time.Second
+
+// minBudget is the shortest deadline a budget can produce.
+const minBudget = time.Second
+
+// runContext builds the ctx of one run: the user context, cancellable with a
+// cause, plus a deadline (cause ErrTimeCap) when the request carries a
+// budget. Without a budget the ctx has no deadline, as before.
+func runContext(turn *Turn) (context.Context, context.CancelCauseFunc) {
+	parent := agentclient.WithUserContext(context.Background(), turn.Context)
+	if turn.Budget == nil || turn.Budget.RemainingMs <= 0 {
+		return context.WithCancelCause(parent)
+	}
+	d := time.Duration(turn.Budget.RemainingMs)*time.Millisecond - BudgetMargin
+	if d < minBudget {
+		d = minBudget
+	}
+	dctx, stop := context.WithDeadlineCause(parent, time.Now().Add(d), ErrTimeCap)
+	ctx, cancel := context.WithCancelCause(dctx)
+	return ctx, func(cause error) {
+		cancel(cause)
+		stop()
+	}
+}
+
+// ackCaps is ChatAck.caps: nil unless the agent opted into a capability.
+func (a *Agent) ackCaps() *wire.AckCaps {
+	if !a.cfg.Progress && !a.cfg.Renew {
+		return nil
+	}
+	return &wire.AckCaps{Progress: a.cfg.Progress}
 }
 
 // New creates an agent. The NATS connection is established immediately
@@ -283,6 +332,8 @@ func (a *Agent) Card() wire.AgentCard {
 			Sessions:    a.sessions != nil,
 			Attachments: a.cfg.Attachments,
 			UserContext: a.cfg.UserContext,
+			Progress:    a.cfg.Progress,
+			Renew:       a.cfg.Renew,
 		},
 		InputModalities:  a.cfg.InputModalities,
 		OutputModalities: a.cfg.OutputModalities,
@@ -391,7 +442,7 @@ func (a *Agent) Start() error {
 		r, ok := a.runs[req.RunID]
 		if ok {
 			r.cancelled = true
-			r.cancel()
+			r.cancel(nil)
 		}
 		a.mu.Unlock()
 		if ok && msg.Reply != "" {
@@ -553,6 +604,7 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 		Agent:         a.cfg.Name,
 		InstanceID:    a.svc.GetInstanceId(),
 		StreamSubject: turn.StreamSubject,
+		Caps:          a.ackCaps(),
 	}
 	data, err := json.Marshal(ack)
 	if err != nil {
@@ -561,20 +613,20 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 	}
 	msg.ResponseBody = data
 
-	ctx, cancel := context.WithCancel(agentclient.WithUserContext(context.Background(), turn.Context))
+	ctx, cancel := runContext(turn)
 	r := &run{cancel: cancel}
 	a.mu.Lock()
 	a.runs[turn.RunID] = r
 	a.mu.Unlock()
 
-	stream := newStream(a.nc, turn.StreamSubject, turn.RunID, turn.Logger)
+	stream := newStream(a.nc, turn.StreamSubject, turn.RunID, turn.Logger, a.cfg.Progress)
 
 	go func() {
 		defer func() {
 			a.mu.Lock()
 			delete(a.runs, turn.RunID)
 			a.mu.Unlock()
-			cancel()
+			cancel(nil)
 		}()
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -611,8 +663,8 @@ func (a *Agent) handleInvoke(msg *nats_service.NatsMessage) *nats_service.NatsSe
 		return verr
 	}
 
-	ctx, cancel := context.WithCancel(agentclient.WithUserContext(context.Background(), turn.Context))
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(agentclient.WithUserContext(context.Background(), turn.Context))
+	defer cancel(nil)
 	a.mu.Lock()
 	a.runs[turn.RunID] = &run{cancel: cancel}
 	a.mu.Unlock()

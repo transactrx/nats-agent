@@ -18,6 +18,9 @@ const (
 	heartbeatIdle  = 10 * time.Second
 )
 
+// progressEvery is the minimum gap between two progress frames of one run.
+const progressEvery = 15 * time.Second
+
 // Stream emits protocol events for one run. All methods are safe for
 // concurrent use; events after the terminal event are dropped.
 type Stream struct {
@@ -25,21 +28,27 @@ type Stream struct {
 	subject string
 	runID   string
 	logger  *log.Logger
+	// progress is Config.Progress: Progress is a no-op when false.
+	progress bool
+	now      func() time.Time // clock for the progress throttle (test seam)
 
-	mu       sync.Mutex
-	seq      int
-	terminal bool
-	lastPub  time.Time
-	stopHB   chan struct{}
+	mu           sync.Mutex
+	seq          int
+	terminal     bool
+	lastPub      time.Time
+	lastProgress time.Time
+	stopHB       chan struct{}
 }
 
-func newStream(nc *nats.Conn, subject, runID string, logger *log.Logger) *Stream {
+func newStream(nc *nats.Conn, subject, runID string, logger *log.Logger, progress bool) *Stream {
 	return &Stream{
-		nc:      nc,
-		subject: subject,
-		runID:   runID,
-		logger:  logger,
-		stopHB:  make(chan struct{}),
+		nc:       nc,
+		subject:  subject,
+		runID:    runID,
+		logger:   logger,
+		progress: progress,
+		now:      time.Now,
+		stopHB:   make(chan struct{}),
 	}
 }
 
@@ -84,6 +93,24 @@ func (s *Stream) Data(kind string, payload any) {
 	s.publish(wire.AgentEvent{Type: wire.EventData, Kind: kind, Payload: raw})
 }
 
+// Progress tells the caller the run is still working (data event of kind
+// "progress"). At most one frame per 15s per run; extra calls are dropped.
+// No-op unless the agent opted in with Config.Progress.
+func (s *Stream) Progress(stage, detail string) {
+	if !s.progress {
+		return
+	}
+	s.mu.Lock()
+	now := s.now()
+	if !s.lastProgress.IsZero() && now.Sub(s.lastProgress) < progressEvery {
+		s.mu.Unlock()
+		return
+	}
+	s.lastProgress = now
+	s.mu.Unlock()
+	s.Data(wire.DataKindProgress, wire.ProgressPayload{Stage: stage, Detail: detail})
+}
+
 // Status emits human-readable progress text.
 func (s *Stream) Status(text string) {
 	s.publish(wire.AgentEvent{Type: wire.EventStatus, StatusText: text})
@@ -94,9 +121,21 @@ func (s *Stream) Done(stopReason string, usage *wire.Usage) {
 	s.publish(wire.AgentEvent{Type: wire.EventDone, StopReason: stopReason, Usage: usage})
 }
 
+// DoneWithReason terminates the run successfully and says which limit
+// ended it (wire.Reason*).
+func (s *Stream) DoneWithReason(stopReason, reason string, usage *wire.Usage) {
+	s.publish(wire.AgentEvent{Type: wire.EventDone, StopReason: stopReason, Usage: usage, Reason: reason})
+}
+
 // Error terminates the run with a failure the client should surface.
 func (s *Stream) Error(message string, code int) {
 	s.publish(wire.AgentEvent{Type: wire.EventError, Error: message, ErrorStatus: code})
+}
+
+// ErrorWithReason terminates the run with a failure and says which limit
+// ended it (wire.Reason*).
+func (s *Stream) ErrorWithReason(message string, code int, reason string) {
+	s.publish(wire.AgentEvent{Type: wire.EventError, Error: message, ErrorStatus: code, Reason: reason})
 }
 
 func (s *Stream) terminated() bool {
