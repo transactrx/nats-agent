@@ -544,7 +544,10 @@ optional `caps` object describing this run:
 ```
 
 - `progress`: the agent emits progress frames (§12.3) and honors `budget`
-  (§12.2); callers may cut its turns on progress idleness.
+  (§12.2); callers may cut its turns on progress idleness. Callers MUST
+  NOT apply a no-progress cut to a run whose ack lacks `caps.progress`:
+  such an agent only promised pings (the Go client ignores
+  `ChatOptions.IdleWindow` for it).
 - `renew`: the agent accepts a fresh IDT mid-run (§12.4). The ack's
   `caps.renewSubject` is present only when renew is available for this run.
 - `caps` is absent on agents that opted into neither, and on v1.4 agents.
@@ -561,7 +564,8 @@ The chat request may carry the caller's remaining time:
 
 A 1.5 agent ends the turn by `remainingMs` minus a 5 s margin (floor 1 s),
 so it can still send a clean terminal frame before the caller gives up.
-Callers can rely on this only when the card or ack advertises `progress`. If the handler does not end the turn itself, the runtime sends
+Callers can rely on this only when the card or ack advertises `progress`.
+If the handler does not end the turn itself, the runtime sends
 `error` with `errorStatus` 5002, `error` `"time limit reached"` and
 `reason:"time_cap"`. Absent `budget` = the agent's own limits, as before.
 
@@ -599,8 +603,12 @@ Reply:
 
 - Subject rules: `_RENEW.` + 22 random base64url characters, one per run,
   subscribed on the owning instance's connection before the ack is sent and
-  unsubscribed when the run ends (a renew after the end gets no responders).
-  The subject is unguessable and is only ever sent to the caller in the ack.
+  unsubscribed when the run ends. A renew that arrives as or after the run
+  ends gets no reply: the caller sees a timeout or, once the subscription
+  is gone, no responders (Go: `ErrRenewTransport`). The subject is
+  unguessable and is only ever sent to the caller in the ack.
+- NATS permissions: agents need subscribe on `_RENEW.>`; callers need
+  publish on `_RENEW.>` (plus the usual inbox for replies).
 - `runId` must match the run (`wrong_run` otherwise). `expiresAtMs`
   (optional) is the new token's expiry, unix ms.
 - The token is validated with identity **without the decision cache**
@@ -608,7 +616,11 @@ Reply:
   as the run's token (`identity_mismatch`). A verified run requires a
   verified token. With validation off or observe-only the run's admission
   rule applies, but a token that identity resolves to another user or
-  account is still refused. Malformed body = `bad_request`.
+  account is still refused (compared with the caller first resolved for the
+  run). If identity never resolved the run's caller (observe-only or
+  fail-open without ids), a renew is accepted under the same rule as the
+  admission was; the random per-run subject bounds the exposure.
+  Malformed body = `bad_request`.
 - Accepted: the agent uses the new token for every new onward call; calls
   already in flight finish with the token they started with. The old token
   is never revoked by the agent; it expires on its own.
@@ -640,7 +652,13 @@ A cancel request (§5.4) may carry an optional `reason`:
 the caller's limits ended the turn: a 1.5 agent ends the run with an `error`
 event carrying that `reason` (so it can keep its partial work) instead of
 `done`/`cancelled`. Empty or unknown `reason` = a plain cancel, as before.
-The cancel reply is unchanged.
+The cancel reply is unchanged. The cancel is as unauthenticated as it always
+was: the reason only relabels a cancel that was already possible. When
+cancels race, the first cause decides: a cut stays a cut if a plain cancel
+follows, and a plain cancel stays a cancel if a cut follows. Callers that
+cut a turn send the reasoned cancel BEFORE abandoning their own stream
+(Go: call `CancelWithReason` before cancelling the `Chat` context, whose
+cancel path publishes a plain cancel).
 
 ### 12.6 Token rotation (non-normative)
 
@@ -659,6 +677,11 @@ when the current token has 8 min left, and retries with backoff (5 s, 10 s,
   renew, the first token for the whole turn).
 - A v1.4 caller ignores `caps`, the `progress` data kind (unknown kinds are
   ignored, §5.3) and `reason`; it never sends `budget` or renews.
-- An agent on 1.5 that has not opted in still honours a request `budget`
-  and may end a turn with `reason:"time_cap"`; everything else (`caps`,
-  progress frames, renew, other reasons) is emitted only after opt-in.
+- An agent on 1.5 that has not opted in still honours a request `budget`,
+  a reasoned cancel (any of the four cut reasons) and its own shutdown
+  (`InterruptAll`): those end the turn with an `error` carrying `reason`
+  (`time_cap`, `progress_idle`, `token_rotation_failed`, `interrupted`).
+  Everything else (`caps`, progress frames, renew) is emitted only after
+  opt-in.
+- The Go client gates its no-progress cut on the ack's `caps.progress`
+  (§12.1): runs on agents without it behave exactly as plain `Chat`.

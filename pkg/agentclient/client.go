@@ -266,7 +266,9 @@ func (r *Run) Cancel(ctx context.Context) (bool, error) {
 // CancelWithReason cancels this run as a cut by the caller's limits
 // (wire.ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
 // ReasonTimeCap): a 1.5 agent ends it with that reason instead of a user
-// cancel. Older agents treat it as Cancel.
+// cancel. Older agents treat it as Cancel. Call it BEFORE cancelling the
+// Chat context: that path publishes a plain cancel, and the first cancel
+// to reach the agent decides how the run ends.
 func (r *Run) CancelWithReason(ctx context.Context, reason string) (bool, error) {
 	return r.client.CancelWithReason(ctx, r.agent, r.Ack.RunID, reason)
 }
@@ -290,7 +292,9 @@ func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Ti
 // callers that hold the subject without a Run. Empty subject →
 // ErrRenewUnsupported; refused → ErrRenewRejected wrapping the reason; no
 // reply within RenewTimeout → ErrRenewTransport wrapping the cause; ctx
-// ended → the ctx error.
+// ended → the ctx error. A renew after the run ended gets no reply (a
+// timeout, or no responders once the subscription is gone), so it also
+// surfaces as ErrRenewTransport.
 func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewRequest) error {
 	if subject == "" {
 		return ErrRenewUnsupported

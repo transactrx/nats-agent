@@ -78,10 +78,12 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 ### Long turns (protocol 1.5)
 
 Adopting 1.5: bumping the library changes nothing until you set
-`Config.Progress`/`Config.Renew`, with one exception: a request `budget` is
-honoured even without opt-in — the handler ctx gets a deadline
-(`remainingMs` − 5s, cause `agent.ErrTimeCap`) and the turn may end with
-`reason: "time_cap"`.
+`Config.Progress`/`Config.Renew`, with these exceptions: a request `budget`
+is honoured (handler ctx deadline `remainingMs` − 5s, cause
+`agent.ErrTimeCap`); a cancel carrying a cut reason ends the turn as a cut
+(`agent.CutReason(ctx)`); `InterruptAll` ends turns as interrupted. In those
+cases the turn ends with an `error` carrying `reason` instead of
+done/cancelled.
 
 - `Config.Progress: true` — call `stream.Progress(stage, detail)` on real
   work (model output, tool start/end); at most one frame per 15s is sent.
@@ -91,9 +93,13 @@ honoured even without opt-in — the handler ctx gets a deadline
   `turn.OnRenew(fn)` to be told; calls in flight keep their token.
 - Turns cut by a limit end with `reason` (`time_cap`, `interrupted`, …);
   `agent.InterruptAll()` ends running turns on shutdown.
-- Callers: `agentclient.ChatWith(…, ChatOptions{IdleWindow})`,
-  `Run.Caps`, `Run.Renew`; `pkg/rotation` keeps a long turn supplied with
+- Callers: `agentclient.ChatWith(…, ChatOptions{IdleWindow})` (applies
+  only to agents whose ack declares progress), `Run.Caps`, `Run.Renew`,
+  `Run.CancelWithReason` (call it before cancelling the Chat context, which
+  publishes a plain cancel); `pkg/rotation` keeps a long turn supplied with
   short-lived tokens. Wire details: [SPEC.md §12](SPEC.md#12-long-turns-v15).
+- NATS permissions for renew: agents subscribe `_RENEW.>`, callers publish
+  `_RENEW.>`.
 
 ### User context (protocol 1.3)
 
