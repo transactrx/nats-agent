@@ -221,6 +221,17 @@ func forbidden(reason string) *nats_service.NatsServiceError {
 // the session id). Returns the caller Identity on allow, or a 403 envelope.
 // Pass-through modes return Verified=false, never an error.
 func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.NatsServiceError) {
+	return v.authorize(token, scope, true)
+}
+
+// AuthorizeFresh is Authorize without reading the decision cache: identity
+// is always asked, so a token revoked since its last cached allow is
+// refused. Used to accept a rotated token mid-run.
+func (v *Validator) AuthorizeFresh(token, scope string) (Identity, *nats_service.NatsServiceError) {
+	return v.authorize(token, scope, false)
+}
+
+func (v *Validator) authorize(token, scope string, useCache bool) (Identity, *nats_service.NatsServiceError) {
 	token = strings.TrimSpace(token)
 	if !v.cfg.Enabled {
 		return Identity{IDT: token}, nil
@@ -240,7 +251,7 @@ func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.Nats
 	}
 
 	key := cacheKey(token, scope, appID, fnID)
-	if v.cfg.CacheTTL > 0 {
+	if useCache && v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
 		if e, ok := v.cache[key]; ok && time.Now().Before(e.expires) {
 			v.mu.Unlock()

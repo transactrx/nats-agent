@@ -271,3 +271,27 @@ var errTest = errTestType{}
 type errTestType struct{}
 
 func (errTestType) Error() string { return "boom" }
+
+func TestAuthorizeFreshSkipsCacheRead(t *testing.T) {
+	calls := 0
+	valid := true
+	v := fakeValidator(Validation{Enabled: true, CacheTTL: time.Minute}, func(validateRequest) (validateResponse, error) {
+		calls++
+		if !valid {
+			r := "TOKEN_REVOKED"
+			return validateResponse{Valid: false, Reason: &r}, nil
+		}
+		return validateResponse{Valid: true, FunctionGranted: true, UserID: "u1", AccountID: "a1"}, nil
+	})
+	if _, e := v.Authorize("IDT-1.c", "s1"); e != nil {
+		t.Fatalf("first allow: %v", e)
+	}
+	valid = false
+	if _, e := v.Authorize("IDT-1.c", "s1"); e != nil || calls != 1 {
+		t.Fatalf("Authorize must still use the cache: e=%v calls=%d", e, calls)
+	}
+	_, e := v.AuthorizeFresh("IDT-1.c", "s1")
+	if e == nil || e.ErrorMessage != "TOKEN_REVOKED" || calls != 2 {
+		t.Fatalf("AuthorizeFresh must ask identity again: e=%+v calls=%d", e, calls)
+	}
+}

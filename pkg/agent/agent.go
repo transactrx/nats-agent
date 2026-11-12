@@ -42,7 +42,10 @@ type Turn struct {
 	Logger *log.Logger
 	// Identity is the runtime's verdict on the caller (see IDTValidation).
 	// When Identity.Verified, UserID has been replaced by the verified id.
+	// Identity.IDT keeps the first token; see CurrentIDT for renewed ones.
 	Identity Identity
+
+	tok *tokenHolder // current token (Config.Renew); nil = Identity.IDT
 }
 
 // Location is the user's time zone from the request context, or UTC.
@@ -588,6 +591,7 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		RunID:       "run_" + uuid.New().String(),
 		Logger:      msg.Logger,
 		Identity:    id,
+		tok:         &tokenHolder{current: id.IDT},
 	}, nil
 }
 
@@ -606,8 +610,27 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 		StreamSubject: turn.StreamSubject,
 		Caps:          a.ackCaps(),
 	}
+	// Private renew subject, subscribed before the ack goes out on this
+	// same connection so the caller can use it right away.
+	var renewSub *nats.Subscription
+	if a.cfg.Renew {
+		subject, sub, err := a.subscribeRenew(turn)
+		if err != nil {
+			turn.Logger.Printf("run %s: renew unavailable: %v", turn.RunID, err)
+		} else {
+			ack.Caps.RenewSubject = subject
+			renewSub = sub
+		}
+	}
+	endRenew := func() {
+		turn.tok.close()
+		if renewSub != nil {
+			_ = renewSub.Unsubscribe()
+		}
+	}
 	data, err := json.Marshal(ack)
 	if err != nil {
+		endRenew()
 		e := nats_service.NewServerError("marshaling ack", wire.CodeInternal, err)
 		return &e
 	}
@@ -623,6 +646,7 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 
 	go func() {
 		defer func() {
+			endRenew()
 			a.mu.Lock()
 			delete(a.runs, turn.RunID)
 			a.mu.Unlock()
