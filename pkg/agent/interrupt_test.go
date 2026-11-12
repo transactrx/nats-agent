@@ -233,3 +233,42 @@ func TestCutReasonMapping(t *testing.T) {
 		t.Fatalf("Error() = %q", e)
 	}
 }
+
+// The first cause of a run's end decides its terminal frame: a cut followed
+// by a user cancel stays a cut; a user cancel followed by a cut stays a
+// user cancel.
+func TestFirstCauseDecidesReason(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second string // cancel reasons ("" = user cancel)
+		wantCut       bool
+	}{
+		{"cut then user cancel", wire.ReasonProgressIdle, "", true},
+		{"user cancel then cut", "", wire.ReasonProgressIdle, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started, ended, release := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{})
+			a, _, _ := startRenewAgent(t, testAgentOpts{handler: func(ctx context.Context, turn *Turn, stream *Stream) error {
+				started <- struct{}{}
+				<-ctx.Done()
+				ended <- struct{}{}
+				<-release // stays running so the second cancel reaches it
+				return ctx.Err()
+			}})
+			run := chatAs(t, a, "")
+			waitStarted(t, started)
+			cancelRun(t, run, tc.first)
+			waitStarted(t, ended)
+			cancelRun(t, run, tc.second)
+			close(release)
+			ev := terminal(t, run)
+			if tc.wantCut {
+				if ev.Type != wire.EventError || ev.Reason != wire.ReasonProgressIdle {
+					t.Fatalf("terminal = %+v, want error with reason progress_idle", ev)
+				}
+			} else if ev.Type != wire.EventDone || ev.StopReason != wire.StopCancelled || ev.Reason != "" {
+				t.Fatalf("terminal = %+v, want done/cancelled", ev)
+			}
+		})
+	}
+}

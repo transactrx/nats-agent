@@ -724,8 +724,9 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 		switch {
 		case stream.terminated():
 			// handler already ended the run
-		case wasCancelled:
-			stream.Done(wire.StopCancelled, nil)
+		// The first cause decides: a cut keeps its reason even if a user
+		// cancel arrives later; a user cancel that came first leaves cause
+		// context.Canceled, so CutReason is "".
 		case CutReason(ctx) != "":
 			// Fixed text per reason: the handler's raw error is not shown.
 			reason := CutReason(ctx)
@@ -734,6 +735,8 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 				text = "turn cut: " + reason
 			}
 			stream.ErrorWithReason(text, wire.CodeInternal, reason)
+		case wasCancelled:
+			stream.Done(wire.StopCancelled, nil)
 		case err != nil:
 			stream.Error(err.Error(), wire.CodeInternal)
 		default:
