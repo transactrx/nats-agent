@@ -415,12 +415,20 @@ type streamReader struct {
 	idle         <-chan struct{}
 	resetDead    func()
 	cancelRemote func()
+	// newWatcher builds every watcher of this run (test seam: a manual
+	// clock). beforeObserve, nil outside tests, runs just before Observe.
+	newWatcher    func(time.Duration) *progress.Watcher
+	beforeObserve func()
 }
 
 func newStreamReader(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent) *streamReader {
-	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func() {}}
+	return newStreamReaderWith(runID, window, msgs, out, progress.NewWatcher)
+}
+
+func newStreamReaderWith(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent, newWatcher func(time.Duration) *progress.Watcher) *streamReader {
+	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func() {}, newWatcher: newWatcher}
 	if window > 0 {
-		r.watcher = progress.NewWatcher(window)
+		r.watcher = newWatcher(window)
 		r.idle = r.watcher.Expired()
 	}
 	return r
@@ -450,7 +458,7 @@ func (r *streamReader) expired() bool {
 // arrived" back into a live window.
 func (r *streamReader) revive() {
 	old := r.watcher
-	r.watcher = progress.NewWatcher(r.window)
+	r.watcher = r.newWatcher(r.window)
 	if stage := old.LastStage(); stage != "" {
 		r.watcher.Touch(stage)
 	}
@@ -477,10 +485,16 @@ func (r *streamReader) onMsg(m *nats.Msg) bool {
 	}
 	r.resetDead()
 	if r.watcher != nil {
-		if ev.IsProgress() && r.expired() {
-			r.revive()
+		if r.beforeObserve != nil {
+			r.beforeObserve()
 		}
 		r.watcher.Observe(&ev)
+		// Checked after Observe: the window may end right before it, and
+		// Observe is then a no-op on the expired watcher.
+		if ev.IsProgress() && r.expired() {
+			r.revive()
+			r.watcher.Observe(&ev)
+		}
 	}
 	if ev.Type == wire.EventPing {
 		return false

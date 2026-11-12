@@ -8,15 +8,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/transactrx/nats-agent/internal/progressclock"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
-// timer and clock are the test seam over the time package.
-type timer interface{ Stop() bool }
+// timer and clock are the test seam over the time package, shared with
+// this module's other tests through internal/progressclock.
+type (
+	timer = progressclock.Timer
+	clock = progressclock.Clock
+)
 
-type clock interface {
-	Now() time.Time
-	AfterFunc(d time.Duration, f func()) timer
+func init() {
+	progressclock.NewWatcher = func(window time.Duration, c progressclock.Clock) any { return newWatcher(window, c) }
 }
 
 type realClock struct{}

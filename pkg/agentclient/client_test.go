@@ -15,6 +15,8 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service_common "github.com/transactrx/nats-service/pkg/nats-service-common"
 
+	"github.com/transactrx/nats-agent/internal/progressclock"
+	"github.com/transactrx/nats-agent/pkg/progress"
 	"github.com/transactrx/nats-agent/pkg/toolclient"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -607,19 +609,32 @@ func TestIdleExpiryWithOnlyQueuedPingsCuts(t *testing.T) {
 }
 
 // testReader builds a stream reader whose idle watcher has already expired.
-func testReader(t *testing.T) (r *streamReader, msgs chan *nats.Msg, out chan wire.AgentEvent, cancels *atomic.Int32) {
+// readerWindow is the reader tests' idle window on a manual clock.
+const readerWindow = 20 * time.Second
+
+// newClockReader builds a stream reader whose watchers run on a manual
+// clock; nothing in these tests waits on real time.
+func newClockReader(t *testing.T) (r *streamReader, fc *progressclock.Fake, msgs chan *nats.Msg, out chan wire.AgentEvent, cancels *atomic.Int32) {
 	t.Helper()
+	fc = progressclock.NewFake()
 	msgs = make(chan *nats.Msg, 8)
 	out = make(chan wire.AgentEvent, 8)
 	cancels = &atomic.Int32{}
-	const window = 20 * time.Millisecond
-	r = newStreamReader("run-1", window, msgs, out)
+	r = newStreamReaderWith("run-1", readerWindow, msgs, out, func(w time.Duration) *progress.Watcher {
+		return progressclock.NewWatcher(w, fc).(*progress.Watcher)
+	})
 	r.cancelRemote = func() { cancels.Add(1) }
 	t.Cleanup(r.stop)
-	select {
-	case <-r.idle:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watcher did not expire")
+	return r, fc, msgs, out, cancels
+}
+
+// testReader is newClockReader with the watcher already expired.
+func testReader(t *testing.T) (r *streamReader, msgs chan *nats.Msg, out chan wire.AgentEvent, cancels *atomic.Int32) {
+	t.Helper()
+	r, fc, msgs, out, cancels := newClockReader(t)
+	fc.Advance(readerWindow)
+	if !idleReady(r) {
+		t.Fatal("watcher did not expire at the window")
 	}
 	return r, msgs, out, cancels
 }
@@ -715,5 +730,46 @@ func TestIdleBranchCutsWithoutProgress(t *testing.T) {
 		if cancels.Load() != 1 {
 			t.Fatalf("queued %+v: cancels = %d, want 1", queued, cancels.Load())
 		}
+	}
+}
+
+// The window can end between the expiry check and Observe (Observe is then
+// a no-op on the expired watcher). The progress frame must still revive it.
+func TestProgressAtWindowEdgeRevives(t *testing.T) {
+	r, fc, _, out, cancels := newClockReader(t)
+	fc.Advance(readerWindow - time.Millisecond)
+	if idleReady(r) {
+		t.Fatal("expired before the window")
+	}
+	fired := false
+	r.beforeObserve = func() {
+		if !fired {
+			fired = true
+			fc.Advance(time.Millisecond) // the timer fires right at the edge
+		}
+	}
+	if r.onMsg(frame(wire.AgentEvent{Type: wire.EventText, TextDelta: "a"})) {
+		t.Fatal("text ended the run")
+	}
+	if !fired {
+		t.Fatal("edge hook not reached")
+	}
+	if idleReady(r) {
+		t.Fatal("progress at the window edge left the watcher expired: next loop turn would cut")
+	}
+	if ev := <-out; ev.Type != wire.EventText {
+		t.Fatalf("delivered %+v", ev)
+	}
+	// The revived window is a full one from the frame.
+	fc.Advance(readerWindow - time.Millisecond)
+	if idleReady(r) {
+		t.Fatal("revived watcher expired early")
+	}
+	fc.Advance(time.Millisecond)
+	if !idleReady(r) {
+		t.Fatal("revived watcher never expires")
+	}
+	if cancels.Load() != 0 {
+		t.Fatalf("cancels = %d", cancels.Load())
 	}
 }
