@@ -34,6 +34,10 @@ type tokenHolder struct {
 	expiry  time.Time // zero = unknown
 	hooks   []func(idt string)
 	closed  bool // run ended: renews are ignored
+	// userID/accountID: the run's caller as identity first resolved it (at
+	// admission or the first fresh check); "" = not known yet. Renews of an
+	// unverified run are compared against these.
+	userID, accountID string
 }
 
 // CurrentIDT is the latest accepted token of this run (the first one until a
@@ -85,6 +89,22 @@ func (h *tokenHolder) swap(token string, expiresAtMs int64) ([]func(string), boo
 		h.expiry = time.UnixMilli(expiresAtMs)
 	}
 	return slices.Clone(h.hooks), true
+}
+
+// caller returns the remembered caller ids ("" when unknown).
+func (h *tokenHolder) caller() (string, string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.userID, h.accountID
+}
+
+// rememberCaller keeps the first resolved caller; later calls are ignored.
+func (h *tokenHolder) rememberCaller(userID, accountID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.userID == "" && userID != "" {
+		h.userID, h.accountID = userID, accountID
+	}
 }
 
 func (h *tokenHolder) isClosed() bool {
@@ -158,13 +178,17 @@ func (a *Agent) applyRenew(turn *Turn, body []byte) *wire.RenewResponse {
 		return reject(renewInvalidToken)
 	}
 	orig := turn.Identity
-	if !orig.Verified && orig.UserID == "" && id.UserID != "" {
-		// Unverified run admitted without ids (observe deny): learn its
-		// caller from the token it holds now, so another user's token is
-		// still refused.
-		if cur, cerr := a.idt.AuthorizeFresh(turn.CurrentIDT(), turn.SessionID); cerr == nil {
-			orig.UserID, orig.AccountID = cur.UserID, cur.AccountID
+	if !orig.Verified {
+		// Unverified run (observe deny, fail-open, validation off): compare
+		// with the caller identity first resolved for it. When unknown,
+		// learn it once from the token the run holds now and keep it, so
+		// later renews are compared even after that token expires.
+		if uid, _ := turn.tok.caller(); uid == "" && id.UserID != "" {
+			if cur, cerr := a.idt.AuthorizeFresh(turn.CurrentIDT(), turn.SessionID); cerr == nil {
+				turn.tok.rememberCaller(cur.UserID, cur.AccountID)
+			}
 		}
+		orig.UserID, orig.AccountID = turn.tok.caller()
 	}
 	if !sameCaller(orig, id) {
 		return reject(renewIdentityMismatch)

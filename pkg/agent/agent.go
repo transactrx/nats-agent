@@ -606,7 +606,7 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		RunID:       "run_" + uuid.New().String(),
 		Logger:      msg.Logger,
 		Identity:    id,
-		tok:         &tokenHolder{current: id.IDT},
+		tok:         &tokenHolder{current: id.IDT, userID: id.UserID, accountID: id.AccountID},
 	}, nil
 }
 

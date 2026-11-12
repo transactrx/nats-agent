@@ -507,3 +507,30 @@ func TestOnRenewHookPanicRecovered(t *testing.T) {
 	close(release)
 	drainRun(run)
 }
+
+// Observe mode: the caller resolved at the first fresh check is kept, so a
+// later renew is still compared after the run's current token has expired.
+func TestRenewObserveModeAfterTokenExpiry(t *testing.T) {
+	subj := "test.renew.identity." + t.Name()
+	f := startFakeIdentity(t, subj)
+	a, turns, release := startRenewAgent(t, testAgentOpts{renew: true, identity: subj, observe: true})
+	run := chatAs(t, a, "IDT-aliceNoFn.c") // admitted without ids
+	turn := waitTurn(t, turns)
+	if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: "IDT-alice2.c"}); !resp.Applied {
+		t.Fatalf("same user's token rejected: %+v", resp)
+	}
+	// Both tokens the run has held are now expired at identity.
+	f.revoke("IDT-aliceNoFn.c")
+	f.revoke("IDT-alice2.c")
+	if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: "IDT-bob.c"}); resp.Applied || resp.Reason != renewIdentityMismatch {
+		t.Fatalf("another user's token accepted after expiry: %+v", resp)
+	}
+	if turn.CurrentIDT() != "IDT-alice2.c" {
+		t.Fatalf("CurrentIDT changed on reject: %q", turn.CurrentIDT())
+	}
+	if resp := renew(t, run, wire.RenewRequest{RunID: run.Ack.RunID, IDT: "IDT-alice1.c"}); !resp.Applied {
+		t.Fatalf("same user's token rejected after expiry: %+v", resp)
+	}
+	close(release)
+	drainRun(run)
+}
