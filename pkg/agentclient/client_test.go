@@ -518,3 +518,91 @@ func TestRenewTransportError(t *testing.T) {
 		t.Fatalf("rejected: %v", err)
 	}
 }
+
+// Progress frames queued when the idle window expires prove the agent was
+// working (the reader was slow): no cut, the window restarts, and the turn
+// ends with the agent's own done.
+func TestIdleExpiryWithQueuedProgressDoesNotCut(t *testing.T) {
+	const texts = 80 // more than the Events buffer, so the reader blocks
+	sendDone := make(chan struct{})
+	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+		for i := 0; i < texts; i++ {
+			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
+		}
+		<-sendDone
+		publish(wire.AgentEvent{Type: wire.EventDone, StopReason: wire.StopEndTurn})
+	})
+	c := NewFromConn(testConn(t))
+	const window = 300 * time.Millisecond
+	run, err := c.ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: window})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	time.Sleep(2 * window) // nobody reads: the watcher expires with text frames queued
+	var evs []wire.AgentEvent
+	timeout := time.After(5 * time.Second)
+	for len(evs) < texts {
+		select {
+		case ev, ok := <-run.Events:
+			if !ok {
+				t.Fatalf("run ended after %d events: %+v", len(evs), evs[len(evs)-1])
+			}
+			if ev.Type != wire.EventText {
+				t.Fatalf("event %d = %+v, want text (no idle cut)", len(evs), ev)
+			}
+			evs = append(evs, ev)
+		case <-timeout:
+			t.Fatalf("only %d texts", len(evs))
+		}
+	}
+	close(sendDone)
+	rest := drain(t, run, 5*time.Second)
+	if len(rest) != 1 || rest[0].Type != wire.EventDone || rest[0].Reason != "" {
+		t.Fatalf("after texts got %+v, want the agent's done only", rest)
+	}
+	for i, ev := range evs {
+		if ev.TextDelta != fmt.Sprint(i) {
+			t.Fatalf("text %d = %q, out of order", i, ev.TextDelta)
+		}
+	}
+	select {
+	case id := <-f.cancels:
+		t.Fatalf("cancel %q published although progress was queued", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Only pings queued at expiry: still idle, the cut happens.
+func TestIdleExpiryWithOnlyQueuedPingsCuts(t *testing.T) {
+	const texts = 65 // the reader blocks on the last one
+	stop := make(chan struct{})
+	defer close(stop)
+	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
+		for i := 0; i < texts; i++ {
+			publish(wire.AgentEvent{Type: wire.EventText, TextDelta: fmt.Sprint(i)})
+		}
+		pingsUntil(stop, publish)
+	})
+	c := NewFromConn(testConn(t))
+	const window = 200 * time.Millisecond
+	run, err := c.ChatWith(context.Background(), f.name, chatReq(), ChatOptions{IdleWindow: window})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	time.Sleep(3 * window) // pings queue up behind the blocked reader
+	evs := drain(t, run, 5*time.Second)
+	if len(evs) != texts+1 {
+		t.Fatalf("got %d events, want %d texts + idle cut", len(evs), texts)
+	}
+	if last := evs[texts]; last.Type != wire.EventError || last.Reason != wire.ReasonProgressIdle {
+		t.Fatalf("terminal = %+v, want progress_idle cut", last)
+	}
+	select {
+	case id := <-f.cancels:
+		if id != "run-1" {
+			t.Fatalf("cancel for %q", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no cancel published on idle cut")
+	}
+}
