@@ -342,8 +342,28 @@ func WithToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, tokenCtxKey{}, token)
 }
 
-// TokenFromContext returns the token set by WithToken, or "".
+type tokenSourceCtxKey struct{}
+
+// WithTokenSource returns a context whose token is read from src at call
+// time, so a long-lived context follows a token that is renewed while it is
+// in use. TokenFromContext (and so every authenticated call) asks src first
+// and falls back to the WithToken value when src returns "". nil src is a
+// no-op.
+func WithTokenSource(ctx context.Context, src func() string) context.Context {
+	if src == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenSourceCtxKey{}, src)
+}
+
+// TokenFromContext returns the token from the WithTokenSource source, else
+// the token set by WithToken, or "".
 func TokenFromContext(ctx context.Context) string {
+	if src, ok := ctx.Value(tokenSourceCtxKey{}).(func() string); ok {
+		if v := src(); v != "" {
+			return v
+		}
+	}
 	v, _ := ctx.Value(tokenCtxKey{}).(string)
 	return v
 }

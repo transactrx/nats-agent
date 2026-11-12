@@ -6,6 +6,7 @@ package agentclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
 	idtpkg "github.com/transactrx/nats-agent/pkg/idt"
+	"github.com/transactrx/nats-agent/pkg/progress"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -27,6 +29,17 @@ const (
 	// DeadRunTimeout is how long a run may go without any event (agents
 	// heartbeat every ≤15s) before the client declares it dead.
 	DeadRunTimeout = 45 * time.Second
+	// RenewTimeout bounds one renew request/reply.
+	RenewTimeout = 5 * time.Second
+)
+
+var (
+	// ErrRenewUnsupported: the run (or agent) offers no renew subject.
+	ErrRenewUnsupported = errors.New("agentclient: run does not support renew")
+	// ErrRenewRejected: the agent answered and refused the token; the
+	// wrapping error carries the agent's reason. Transport failures (no
+	// responders, timeout) are returned as other errors so callers can retry.
+	ErrRenewRejected = errors.New("agentclient: renew rejected")
 )
 
 // ServiceError is a protocol-level error reply from an agent (§9 envelope).
@@ -143,7 +156,17 @@ func WithIDT(ctx context.Context, idt string) context.Context {
 	return idtpkg.WithToken(ctx, idt)
 }
 
-// IDTFromContext returns the token set by WithIDT, or "".
+// WithIDTSource returns a context whose token is read from src on every
+// call, so a long turn picks up a renewed token for its next request. It
+// applies to everything that reads the token from ctx (Chat, Invoke,
+// Sessions*, toolclient runs). When src returns "" the WithIDT value is used.
+// nil src is a no-op.
+func WithIDTSource(ctx context.Context, src func() string) context.Context {
+	return idtpkg.WithTokenSource(ctx, src)
+}
+
+// IDTFromContext returns the token from the WithIDTSource source, else the
+// one set by WithIDT, or "".
 func IDTFromContext(ctx context.Context) string {
 	return idtpkg.TokenFromContext(ctx)
 }
@@ -219,6 +242,8 @@ func (c *Client) Ping(ctx context.Context, agent string) (*wire.PingResponse, er
 type Run struct {
 	Ack    wire.ChatAck
 	Events <-chan wire.AgentEvent
+	// Caps is Ack.Caps, zero when the agent sent none (older agents).
+	Caps wire.AckCaps
 
 	client *Client
 	agent  string
@@ -230,12 +255,69 @@ func (r *Run) Cancel(ctx context.Context) (bool, error) {
 	return r.client.Cancel(ctx, r.agent, r.Ack.RunID)
 }
 
+// Renew hands the running turn a fresh token (no expiry sent).
+// ErrRenewUnsupported when the agent offered no renew subject.
+func (r *Run) Renew(ctx context.Context, idt string) error {
+	return r.RenewWithExpiry(ctx, idt, time.Time{})
+}
+
+// RenewWithExpiry is Renew carrying the new token's expiry (zero time = none).
+func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Time) error {
+	req := wire.RenewRequest{RunID: r.Ack.RunID, IDT: idt}
+	if !expiresAt.IsZero() {
+		req.ExpiresAtMs = expiresAt.UnixMilli()
+	}
+	return Renew(ctx, r.client.nc, r.Caps.RenewSubject, req)
+}
+
+// Renew sends req to a run's renew subject (ChatAck.Caps.RenewSubject), for
+// callers that hold the subject without a Run. Empty subject →
+// ErrRenewUnsupported; refused → ErrRenewRejected wrapping the reason; no
+// reply within RenewTimeout (or ctx) → a wrapped transport error.
+func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewRequest) error {
+	if subject == "" {
+		return ErrRenewUnsupported
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	rctx, cancel := context.WithTimeout(ctx, RenewTimeout)
+	defer cancel()
+	msg, err := nc.RequestWithContext(rctx, subject, data)
+	if err != nil {
+		return fmt.Errorf("renew request to %s: %w", subject, err)
+	}
+	var resp wire.RenewResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return fmt.Errorf("decoding renew reply from %s: %w", subject, err)
+	}
+	if !resp.Applied {
+		return fmt.Errorf("%w: %s", ErrRenewRejected, resp.Reason)
+	}
+	return nil
+}
+
+// ChatOptions tunes one chat turn. The zero value behaves exactly as Chat.
+type ChatOptions struct {
+	// IdleWindow > 0 cuts the run when no progress (any event but a ping)
+	// arrives for this long: the client publishes a best-effort cancel and
+	// ends the stream with an error event, Reason wire.ReasonProgressIdle.
+	// 0 = no idle cut.
+	IdleWindow time.Duration
+}
+
 // Chat starts a streaming chat turn. If req.StreamSubject is empty, a unique
 // inbox is generated. The returned Run's Events channel delivers everything
 // from start through the terminal event; if the agent goes silent past
 // DeadRunTimeout or ctx is cancelled, the client synthesizes a terminal
 // error event (and, for ctx cancellation, fires a best-effort cancel).
 func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (*Run, error) {
+	return c.ChatWith(ctx, agent, req, ChatOptions{})
+}
+
+// ChatWith is Chat with options (see ChatOptions).
+func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatRequest, o ChatOptions) (*Run, error) {
 	if len(req.Message.Content) == 0 {
 		return nil, fmt.Errorf("chat request needs a message with content")
 	}
@@ -258,30 +340,55 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 
 	out := make(chan wire.AgentEvent, 64)
 	run := &Run{Ack: *ack, Events: out, client: c, agent: agent}
+	if ack.Caps != nil {
+		run.Caps = *ack.Caps
+	}
+
+	// idle stays nil (never ready) without an idle window.
+	var watcher *progress.Watcher
+	var idle <-chan struct{}
+	if o.IdleWindow > 0 {
+		watcher = progress.NewWatcher(o.IdleWindow)
+		idle = watcher.Expired()
+	}
 
 	go func() {
 		defer sub.Unsubscribe()
 		defer close(out)
+		if watcher != nil {
+			defer watcher.Stop()
+		}
 		dead := time.NewTimer(DeadRunTimeout)
 		defer dead.Stop()
 
-		terminate := func(message string) {
+		terminate := func(message, reason string) {
 			out <- wire.AgentEvent{
 				RunID: ack.RunID, Type: wire.EventError,
-				Error: message, ErrorStatus: wire.CodeUpstream,
+				Error: message, ErrorStatus: wire.CodeUpstream, Reason: reason,
 			}
+		}
+		cancelRemote := func() {
+			data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
+			_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
 		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				// Best-effort server-side cancel, then end the local stream.
-				data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
-				_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
-				terminate("context cancelled: " + ctx.Err().Error())
+				cancelRemote()
+				terminate("context cancelled: "+ctx.Err().Error(), "")
 				return
 			case <-dead.C:
-				terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout))
+				terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout), "")
+				return
+			case <-idle:
+				message := fmt.Sprintf("run idle: no progress for %s", o.IdleWindow)
+				if stage := watcher.LastStage(); stage != "" {
+					message += " (last stage: " + stage + ")"
+				}
+				cancelRemote()
+				terminate(message, wire.ReasonProgressIdle)
 				return
 			case m := <-msgs:
 				var ev wire.AgentEvent
@@ -295,6 +402,9 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 					<-dead.C
 				}
 				dead.Reset(DeadRunTimeout)
+				if watcher != nil {
+					watcher.Observe(&ev)
+				}
 				if ev.Type == wire.EventPing {
 					continue
 				}
