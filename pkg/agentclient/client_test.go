@@ -519,10 +519,9 @@ func TestRenewTransportError(t *testing.T) {
 	}
 }
 
-// Progress frames queued when the idle window expires prove the agent was
-// working (the reader was slow): no cut, the window restarts, and the turn
-// ends with the agent's own done.
-func TestIdleExpiryWithQueuedProgressDoesNotCut(t *testing.T) {
+// End to end: progress frames queued behind a slow reader when the idle
+// window expires do not cut the turn, whichever path handles them.
+func TestIdleExpiryQueuedProgressEndToEnd(t *testing.T) {
 	const texts = 80 // more than the Events buffer, so the reader blocks
 	sendDone := make(chan struct{})
 	f := startFakeAgent(t, nil, func(publish func(wire.AgentEvent)) {
@@ -604,5 +603,117 @@ func TestIdleExpiryWithOnlyQueuedPingsCuts(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no cancel published on idle cut")
+	}
+}
+
+// testReader builds a stream reader whose idle watcher has already expired.
+func testReader(t *testing.T) (r *streamReader, msgs chan *nats.Msg, out chan wire.AgentEvent, cancels *atomic.Int32) {
+	t.Helper()
+	msgs = make(chan *nats.Msg, 8)
+	out = make(chan wire.AgentEvent, 8)
+	cancels = &atomic.Int32{}
+	const window = 20 * time.Millisecond
+	r = newStreamReader("run-1", window, msgs, out)
+	r.cancelRemote = func() { cancels.Add(1) }
+	t.Cleanup(r.stop)
+	select {
+	case <-r.idle:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not expire")
+	}
+	return r, msgs, out, cancels
+}
+
+func frame(ev wire.AgentEvent) *nats.Msg {
+	ev.RunID = "run-1"
+	data, _ := json.Marshal(ev)
+	return &nats.Msg{Data: data}
+}
+
+func idleReady(r *streamReader) bool {
+	select {
+	case <-r.idle:
+		return true
+	default:
+		return false
+	}
+}
+
+// One progress frame queued at expiry, taken by the normal message path:
+// the watcher is revived, so the following loop turn cannot cut.
+func TestProgressAfterExpiryOnMainPathDoesNotCut(t *testing.T) {
+	r, msgs, out, cancels := testReader(t)
+	msgs <- frame(wire.AgentEvent{Type: wire.EventText, TextDelta: "a"})
+	if r.onMsg(<-msgs) {
+		t.Fatal("text ended the run")
+	}
+	if idleReady(r) {
+		t.Fatal("watcher still expired after progress on the main path: next loop turn would cut")
+	}
+	if r.onMsg(frame(wire.AgentEvent{Type: wire.EventDone, StopReason: wire.StopEndTurn})) != true {
+		t.Fatal("done did not end the run")
+	}
+	close(out)
+	var evs []wire.AgentEvent
+	for ev := range out {
+		evs = append(evs, ev)
+	}
+	if len(evs) != 2 || evs[0].Type != wire.EventText || evs[1].Type != wire.EventDone || evs[1].Reason != "" {
+		t.Fatalf("events = %+v, want text then done", evs)
+	}
+	if n := cancels.Load(); n != 0 {
+		t.Fatalf("cancel published %d times", n)
+	}
+}
+
+// Progress frames queued at expiry, taken by the idle branch's drain: no
+// cut, watcher revived.
+func TestIdleExpiryWithQueuedProgressDoesNotCut(t *testing.T) {
+	r, msgs, out, cancels := testReader(t)
+	msgs <- frame(wire.AgentEvent{Type: wire.EventPing})
+	msgs <- frame(wire.AgentEvent{Type: wire.EventText, TextDelta: "a"})
+	if r.onIdle() {
+		t.Fatal("idle branch ended the run although progress was queued")
+	}
+	if idleReady(r) {
+		t.Fatal("watcher not revived by queued progress")
+	}
+	if r.onMsg(frame(wire.AgentEvent{Type: wire.EventDone, StopReason: wire.StopEndTurn})) != true {
+		t.Fatal("done did not end the run")
+	}
+	close(out)
+	var evs []wire.AgentEvent
+	for ev := range out {
+		evs = append(evs, ev)
+	}
+	if len(evs) != 2 || evs[0].Type != wire.EventText || evs[1].Type != wire.EventDone {
+		t.Fatalf("events = %+v, want text then done (ping not delivered)", evs)
+	}
+	if n := cancels.Load(); n != 0 {
+		t.Fatalf("cancel published %d times", n)
+	}
+}
+
+// Only pings queued (or nothing): the idle branch cuts.
+func TestIdleBranchCutsWithoutProgress(t *testing.T) {
+	for _, queued := range [][]wire.AgentEvent{nil, {{Type: wire.EventPing}, {Type: wire.EventPing}}} {
+		r, msgs, out, cancels := testReader(t)
+		for _, ev := range queued {
+			msgs <- frame(ev)
+		}
+		if !r.onIdle() {
+			t.Fatalf("queued %+v: no cut", queued)
+		}
+		close(out)
+		var evs []wire.AgentEvent
+		for ev := range out {
+			evs = append(evs, ev)
+		}
+		if len(evs) != 1 || evs[0].Reason != wire.ReasonProgressIdle {
+			t.Fatalf("queued %+v: events = %+v, want one progress_idle cut", queued, evs)
+		}
+		if cancels.Load() != 1 {
+			t.Fatalf("queued %+v: cancels = %d, want 1", queued, cancels.Load())
+		}
 	}
 }

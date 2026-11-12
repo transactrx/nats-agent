@@ -356,130 +356,41 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 		run.Caps = *ack.Caps
 	}
 
-	// idle stays nil (never ready) without an idle window.
-	var watcher *progress.Watcher
-	var idle <-chan struct{}
-	if o.IdleWindow > 0 {
-		watcher = progress.NewWatcher(o.IdleWindow)
-		idle = watcher.Expired()
+	r := newStreamReader(ack.RunID, o.IdleWindow, msgs, out)
+	r.cancelRemote = func() {
+		data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
+		_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
 	}
 
 	go func() {
 		defer sub.Unsubscribe()
 		defer close(out)
-		if watcher != nil {
-			defer func() { watcher.Stop() }() // the current one; it may be replaced
-		}
+		defer r.stop()
 		dead := time.NewTimer(DeadRunTimeout)
 		defer dead.Stop()
-
-		terminate := func(message, reason string) {
-			out <- wire.AgentEvent{
-				RunID: ack.RunID, Type: wire.EventError,
-				Error: message, ErrorStatus: wire.CodeUpstream, Reason: reason,
-			}
-		}
-		// accept decodes a stream frame; false for garbage and stray runs.
-		accept := func(m *nats.Msg) (wire.AgentEvent, bool) {
-			var ev wire.AgentEvent
-			if err := json.Unmarshal(m.Data, &ev); err != nil {
-				return ev, false
-			}
-			if ev.RunID != "" && ev.RunID != ack.RunID {
-				return ev, false // stray traffic on a shared stream subject
-			}
-			return ev, true
-		}
-		resetDead := func() {
+		r.resetDead = func() {
 			if !dead.Stop() {
 				<-dead.C
 			}
 			dead.Reset(DeadRunTimeout)
-		}
-		cancelRemote := func() {
-			data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
-			_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
 		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				// Best-effort server-side cancel, then end the local stream.
-				cancelRemote()
-				terminate("context cancelled: "+ctx.Err().Error(), "")
+				r.cancelRemote()
+				r.terminate("context cancelled: "+ctx.Err().Error(), "")
 				return
 			case <-dead.C:
-				terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout), "")
+				r.terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout), "")
 				return
-			case <-idle:
-				// Frames already queued when the window expired arrived in
-				// time (the reader was slow, not the agent): handle them
-				// first. Any progress among them means not idle: restart
-				// the window with a fresh watcher and keep going. A queued
-				// terminal ends the run normally.
-				var queued []wire.AgentEvent
-				for draining := true; draining; {
-					select {
-					case m := <-msgs:
-						if ev, ok := accept(m); ok {
-							queued = append(queued, ev)
-						}
-					default:
-						draining = false
-					}
+			case <-r.idle:
+				if r.onIdle() {
+					return
 				}
-				progressed := false
-				for i := range queued {
-					if queued[i].IsProgress() {
-						progressed = true
-						break
-					}
-				}
-				if progressed {
-					old := watcher
-					watcher = progress.NewWatcher(o.IdleWindow)
-					if stage := old.LastStage(); stage != "" {
-						watcher.Touch(stage)
-					}
-					old.Stop()
-					idle = watcher.Expired()
-				}
-				for i := range queued {
-					ev := queued[i]
-					resetDead()
-					watcher.Observe(&ev)
-					if ev.Type == wire.EventPing {
-						continue
-					}
-					out <- ev
-					if ev.IsTerminal() {
-						return
-					}
-				}
-				if progressed {
-					continue
-				}
-				message := fmt.Sprintf("run idle: no progress for %s", o.IdleWindow)
-				if stage := watcher.LastStage(); stage != "" {
-					message += " (last stage: " + stage + ")"
-				}
-				cancelRemote()
-				terminate(message, wire.ReasonProgressIdle)
-				return
 			case m := <-msgs:
-				ev, ok := accept(m)
-				if !ok {
-					continue
-				}
-				resetDead()
-				if watcher != nil {
-					watcher.Observe(&ev)
-				}
-				if ev.Type == wire.EventPing {
-					continue
-				}
-				out <- ev
-				if ev.IsTerminal() {
+				if r.onMsg(m) {
 					return
 				}
 			}
@@ -487,6 +398,120 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 	}()
 
 	return run, nil
+}
+
+// streamReader is the per-run state of ChatWith's reader goroutine. The
+// idle decision lives here so every path applies the same rule: the run is
+// cut only when the watcher has expired, no progress frame was handled since,
+// and none is queued.
+type streamReader struct {
+	runID  string
+	window time.Duration
+	msgs   <-chan *nats.Msg
+	out    chan<- wire.AgentEvent
+	// watcher is one-shot; revive replaces it. nil (and idle nil, never
+	// ready) without an idle window.
+	watcher      *progress.Watcher
+	idle         <-chan struct{}
+	resetDead    func()
+	cancelRemote func()
+}
+
+func newStreamReader(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent) *streamReader {
+	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func() {}}
+	if window > 0 {
+		r.watcher = progress.NewWatcher(window)
+		r.idle = r.watcher.Expired()
+	}
+	return r
+}
+
+// stop releases the current watcher.
+func (r *streamReader) stop() {
+	if r.watcher != nil {
+		r.watcher.Stop()
+	}
+}
+
+func (r *streamReader) expired() bool {
+	if r.watcher == nil {
+		return false
+	}
+	select {
+	case <-r.watcher.Expired():
+		return true
+	default:
+		return false
+	}
+}
+
+// revive replaces an expired watcher with a fresh one for the same window,
+// keeping the last stage. The one place that turns "expired, but progress
+// arrived" back into a live window.
+func (r *streamReader) revive() {
+	old := r.watcher
+	r.watcher = progress.NewWatcher(r.window)
+	if stage := old.LastStage(); stage != "" {
+		r.watcher.Touch(stage)
+	}
+	old.Stop()
+	r.idle = r.watcher.Expired()
+}
+
+func (r *streamReader) terminate(message, reason string) {
+	r.out <- wire.AgentEvent{
+		RunID: r.runID, Type: wire.EventError,
+		Error: message, ErrorStatus: wire.CodeUpstream, Reason: reason,
+	}
+}
+
+// onMsg handles one stream frame; true when the run is over (terminal
+// delivered). Progress after the watcher expired revives it.
+func (r *streamReader) onMsg(m *nats.Msg) bool {
+	var ev wire.AgentEvent
+	if err := json.Unmarshal(m.Data, &ev); err != nil {
+		return false
+	}
+	if ev.RunID != "" && ev.RunID != r.runID {
+		return false // stray traffic on a shared stream subject
+	}
+	r.resetDead()
+	if r.watcher != nil {
+		if ev.IsProgress() && r.expired() {
+			r.revive()
+		}
+		r.watcher.Observe(&ev)
+	}
+	if ev.Type == wire.EventPing {
+		return false
+	}
+	r.out <- ev
+	return ev.IsTerminal()
+}
+
+// onIdle runs when the watcher expired. Frames already queued arrived in
+// time (the reader was slow, not the agent), so they are handled first; a
+// progress frame among them revives the watcher and the run goes on, a
+// terminal ends it normally. Only with nothing (or only pings) queued is
+// the run cut. true when the run is over.
+func (r *streamReader) onIdle() bool {
+	for r.expired() {
+		select {
+		case m := <-r.msgs:
+			if r.onMsg(m) {
+				return true
+			}
+		default:
+			message := fmt.Sprintf("run idle: no progress for %s", r.window)
+			if stage := r.watcher.LastStage(); stage != "" {
+				message += " (last stage: " + stage + ")"
+			}
+			r.cancelRemote()
+			r.terminate(message, wire.ReasonProgressIdle)
+			return true
+		}
+	}
+	return false
 }
 
 // Cancel asks all instances of an agent to cancel a run; the owner replies.
