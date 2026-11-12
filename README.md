@@ -75,6 +75,25 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 | `IDT_VALIDATE_TIMEOUT_SECONDS` | Per-call timeout (default 5s) |
 | `IDT_VALIDATE_CACHE_SECONDS` | Cache TTL, keyed on sha256(token)+session+app+function (default 300s; deny and observe-only results are never cached) |
 
+### Long turns (protocol 1.5)
+
+Adopting 1.5: bumping the library changes nothing until you set
+`Config.Progress`/`Config.Renew`. The one exception is a caller that sends
+`budget`: the handler ctx then gets a deadline (`remainingMs` − 5s, cause
+`agent.ErrTimeCap`).
+
+- `Config.Progress: true` — call `stream.Progress(stage, detail)` on real
+  work (model output, tool start/end); at most one frame per 15s is sent.
+  Callers may then cut a turn that stops progressing (pings don't count).
+- `Config.Renew: true` — the run accepts fresh tokens mid-turn. Use
+  `turn.CurrentIDT()` (not `turn.Identity.IDT`) for each new onward call, or
+  `turn.OnRenew(fn)` to be told; calls in flight keep their token.
+- Turns cut by a limit end with `reason` (`time_cap`, `interrupted`, …);
+  `agent.InterruptAll()` ends running turns on shutdown.
+- Callers: `agentclient.ChatWith(…, ChatOptions{IdleWindow})`,
+  `Run.Caps`, `Run.Renew`; `pkg/rotation` keeps a long turn supplied with
+  short-lived tokens. Wire details: [SPEC.md §12](SPEC.md#12-long-turns-v15).
+
 ### User context (protocol 1.3)
 
 Requests may carry `context` `{timeZone, userName, locale}` — display only,
