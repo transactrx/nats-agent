@@ -15,9 +15,6 @@ import (
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
-// renewSubjectPrefix + 22 random chars is a run's private renew subject.
-const renewSubjectPrefix = "_RENEW."
-
 // RenewResponse.Reason values when a renew is refused.
 const (
 	renewBadRequest       = "bad_request"
@@ -119,18 +116,22 @@ func (h *tokenHolder) close() {
 	h.mu.Unlock()
 }
 
-func newRenewSubject() (string, error) {
+// newRenewSubject is a run's private renew subject, in the agent's own
+// subject space (registered base name, never a regional alias):
+// trx.agent.<name>.renew.<22 random base64url chars>. The agent may already
+// subscribe there and callers publish there; other agents cannot subscribe.
+func newRenewSubject(agentName string) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return renewSubjectPrefix + base64.RawURLEncoding.EncodeToString(b), nil
+	return wire.AgentSubject(agentName, "renew."+base64.RawURLEncoding.EncodeToString(b)), nil
 }
 
 // subscribeRenew opens turn's private renew subject on this instance's
 // connection. The caller unsubscribes when the run ends.
 func (a *Agent) subscribeRenew(turn *Turn) (string, *nats.Subscription, error) {
-	subject, err := newRenewSubject()
+	subject, err := newRenewSubject(a.cfg.Name)
 	if err != nil {
 		return "", nil, err
 	}

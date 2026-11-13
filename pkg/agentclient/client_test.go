@@ -289,7 +289,7 @@ func TestChatUnchangedWithoutOptions(t *testing.T) {
 }
 
 func TestRunCapsFromAck(t *testing.T) {
-	caps := &wire.AckCaps{Progress: true, RenewSubject: "_RENEW.abc"}
+	caps := &wire.AckCaps{Progress: true, RenewSubject: "trx.agent.x.renew.abc"}
 	f := startFakeAgent(t, caps, func(publish func(wire.AgentEvent)) {
 		publish(wire.AgentEvent{Type: wire.EventDone})
 	})
@@ -341,9 +341,9 @@ func renewResponder(t *testing.T, subject string, resp wire.RenewResponse) chan 
 }
 
 func TestRenewRejected(t *testing.T) {
-	subject := nats.NewInbox()
+	subject := wire.AgentSubject("agentR", "renew.Q2x0Yk9fX-abcdefghijk")
 	got := renewResponder(t, subject, wire.RenewResponse{Applied: false, Reason: "identity_mismatch"})
-	run := &Run{Ack: wire.ChatAck{RunID: "run-9"}, Caps: wire.AckCaps{RenewSubject: subject}, client: NewFromConn(testConn(t))}
+	run := &Run{Ack: wire.ChatAck{RunID: "run-9"}, Caps: wire.AckCaps{RenewSubject: subject}, client: NewFromConn(testConn(t)), agent: "agentR"}
 
 	err := run.Renew(context.Background(), "new-token")
 	if !errors.Is(err, ErrRenewRejected) || !strings.Contains(err.Error(), "identity_mismatch") {
@@ -355,9 +355,9 @@ func TestRenewRejected(t *testing.T) {
 }
 
 func TestRenewApplied(t *testing.T) {
-	subject := nats.NewInbox()
+	subject := wire.AgentSubject("agentR", "renew.Q2x0Yk9fX-abcdefghijk")
 	got := renewResponder(t, subject, wire.RenewResponse{Applied: true})
-	run := &Run{Ack: wire.ChatAck{RunID: "run-9"}, Caps: wire.AckCaps{RenewSubject: subject}, client: NewFromConn(testConn(t))}
+	run := &Run{Ack: wire.ChatAck{RunID: "run-9"}, Caps: wire.AckCaps{RenewSubject: subject}, client: NewFromConn(testConn(t)), agent: "agentR"}
 
 	exp := time.UnixMilli(1_900_000_000_123)
 	if err := run.RenewWithExpiry(context.Background(), "new-token", exp); err != nil {
@@ -828,7 +828,7 @@ func TestCancelWithReasonSendsReason(t *testing.T) {
 // An agent whose ack does not declare progress only promised pings: the
 // idle window is ignored for its run (as plain Chat).
 func TestIdleWindowIgnoredWithoutProgressCap(t *testing.T) {
-	for _, caps := range []*wire.AckCaps{nil, {RenewSubject: "_RENEW.x"}} {
+	for _, caps := range []*wire.AckCaps{nil, {RenewSubject: "trx.agent.x.renew.abc"}} {
 		stop := make(chan struct{})
 		f := startFakeAgent(t, caps, func(publish func(wire.AgentEvent)) {
 			pingsUntil(stop, publish)
@@ -849,6 +849,59 @@ func TestIdleWindowIgnoredWithoutProgressCap(t *testing.T) {
 		case id := <-f.cancels:
 			t.Fatalf("caps %+v: cancel %q published", caps, id)
 		default:
+		}
+	}
+}
+
+func TestValidRenewSubject(t *testing.T) {
+	good := "trx.agent.copay.renew.Q2x0Yk9fX-abcdefghijk"
+	for _, tc := range []struct {
+		agent, subject string
+		want           bool
+	}{
+		{"copay", good, true},
+		{"copay_east", good, true}, // regional alias: subject built from the base name
+		{"copay_assist", "trx.agent.copay_assist.renew.abc", true},
+		{"other", good, false},
+		{"copay", "_RENEW.Q2x0Yk9fX-abcdefghijk", false},
+		{"copay", "_INBOX.Q2x0Yk9fX", false},
+		{"copay", "trx.agent.copay.renew.*", false},
+		{"copay", "trx.agent.copay.renew.>", false},
+		{"copay", "trx.agent.copay.renew.ab*c", false},
+		{"copay", "trx.agent.copay.renew.", false},
+		{"copay", "", false},
+		{"", good, false},
+		{"copay", "trx.agent.copay.renew.abc.def", false},
+		{"copay", "trx.agent.copay.renew.ab c", false},
+		{"copay", "trx.agent.copay.chat", false},
+		{"copay", "trx.agent.copay_east.renew.abc", false},
+		{"copay", "x.trx.agent.copay.renew.abc", false},
+	} {
+		if got := ValidRenewSubject(tc.agent, tc.subject); got != tc.want {
+			t.Errorf("ValidRenewSubject(%q, %q) = %v, want %v", tc.agent, tc.subject, got, tc.want)
+		}
+	}
+}
+
+// Run.Renew sends only to a renew subject of the agent the run was started
+// on; anything else (another agent's space, old _RENEW subjects) is refused
+// before anything is published.
+func TestRunRenewRefusesForeignSubject(t *testing.T) {
+	c := NewFromConn(testConn(t))
+	for _, subject := range []string{
+		wire.AgentSubject("otherAgent", "renew.abc"),
+		"_RENEW.Q2x0Yk9fX-abcdefghijk",
+		"_INBOX.abc",
+	} {
+		got := renewResponder(t, subject, wire.RenewResponse{Applied: true})
+		run := &Run{Ack: wire.ChatAck{RunID: "run-9"}, Caps: wire.AckCaps{RenewSubject: subject}, client: c, agent: "agentR"}
+		if err := run.Renew(context.Background(), "tok"); !errors.Is(err, ErrRenewUnsupported) {
+			t.Fatalf("subject %q: Renew = %v, want ErrRenewUnsupported", subject, err)
+		}
+		select {
+		case req := <-got:
+			t.Fatalf("subject %q: token sent: %+v", subject, req)
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }

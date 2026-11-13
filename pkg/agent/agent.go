@@ -423,6 +423,19 @@ func (a *Agent) Start() error {
 			},
 		},
 	}
+	if a.cfg.Renew {
+		regs = append(regs, nats_service.EndpointRegistration{
+			Path:        "renew.>",
+			Description: "Per-run renew subjects (trx.agent.<name>.renew.<random>), announced in the chat ack. Answered only by the owning run's own subscription.",
+			// The service's queue subscription on trx.agent.<name>.> also
+			// receives renew requests; stay silent so the owning run's reply
+			// (or no reply once it ended) is the only answer.
+			Handler: func(msg *nats_service.NatsMessage) *nats_service.NatsServiceError {
+				fwd := nats_service.NewForwardedError(msg.Path)
+				return &fwd
+			},
+		})
+	}
 	if a.invoke != nil {
 		regs = append(regs, nats_service.EndpointRegistration{
 			Path:        "invoke",

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -280,13 +282,43 @@ func (r *Run) Renew(ctx context.Context, idt string) error {
 }
 
 // RenewWithExpiry is Renew carrying the new token's expiry (zero time = none).
+// The ack's renew subject must be a renew subject of the agent this run was
+// started on (ValidRenewSubject); otherwise ErrRenewUnsupported and nothing
+// is sent.
 func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Time) error {
+	if r.Caps.RenewSubject == "" || !ValidRenewSubject(r.agent, r.Caps.RenewSubject) {
+		return ErrRenewUnsupported
+	}
 	req := wire.RenewRequest{RunID: r.Ack.RunID, IDT: idt}
 	if !expiresAt.IsZero() {
 		req.ExpiresAtMs = expiresAt.UnixMilli()
 	}
 	return Renew(ctx, r.client.nc, r.Caps.RenewSubject, req)
 }
+
+// ValidRenewSubject reports whether subject is a renew subject of agent:
+// exactly trx.agent.<name>.renew.<token>, token non-empty base64url
+// characters (no wildcard, whitespace or further dots). agent may be the
+// base name or a regional alias <name>_<region>; the subject is built from
+// the base name either way. Send a token only to a subject that passes.
+func ValidRenewSubject(agent, subject string) bool {
+	if agent == "" {
+		return false
+	}
+	names := []string{agent}
+	if i := strings.LastIndexByte(agent, '_'); i > 0 {
+		names = append(names, agent[:i]) // regional alias → base name
+	}
+	for _, name := range names {
+		prefix := wire.AgentSubject(name, "renew.")
+		if tok, ok := strings.CutPrefix(subject, prefix); ok && renewTokenRe.MatchString(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+var renewTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Renew sends req to a run's renew subject (ChatAck.Caps.RenewSubject), for
 // callers that hold the subject without a Run. Empty subject →

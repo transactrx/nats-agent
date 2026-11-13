@@ -188,8 +188,12 @@ func TestRenewAccepted(t *testing.T) {
 	run := chatAs(t, a, "IDT-alice1.c")
 	turn := waitTurn(t, turns)
 
-	if !strings.HasPrefix(run.Ack.Caps.RenewSubject, "_RENEW.") || len(run.Ack.Caps.RenewSubject) != len("_RENEW.")+22 {
-		t.Fatalf("renewSubject = %q, want _RENEW.<22 chars>", run.Ack.Caps.RenewSubject)
+	prefix := wire.AgentSubject(a.cfg.Name, "renew.")
+	if !strings.HasPrefix(run.Ack.Caps.RenewSubject, prefix) || len(run.Ack.Caps.RenewSubject) != len(prefix)+22 {
+		t.Fatalf("renewSubject = %q, want %s<22 chars>", run.Ack.Caps.RenewSubject, prefix)
+	}
+	if !agentclient.ValidRenewSubject(a.cfg.Name, run.Ack.Caps.RenewSubject) {
+		t.Fatalf("renewSubject %q rejected by the client validator", run.Ack.Caps.RenewSubject)
 	}
 	if turn.CurrentIDT() != "IDT-alice1.c" {
 		t.Fatalf("CurrentIDT before renew = %q", turn.CurrentIDT())
@@ -374,10 +378,12 @@ func TestRenewSubjectClosedAfterRun(t *testing.T) {
 	if n := a.nc.NumSubscriptions(); n != subsBefore {
 		t.Fatalf("renew subscription leaked: %d → %d", subsBefore, n)
 	}
+	// The subject lives in the agent's space, where the service stays silent
+	// on renew paths: a late renew gets no reply at all.
 	data, _ := json.Marshal(wire.RenewRequest{RunID: run.Ack.RunID, IDT: "IDT-x2.c"})
-	_, err := streamConn(t).Request(run.Ack.Caps.RenewSubject, data, time.Second)
-	if !errors.Is(err, nats.ErrNoResponders) {
-		t.Fatalf("renew after run end: err = %v, want no responders", err)
+	_, err := streamConn(t).Request(run.Ack.Caps.RenewSubject, data, 300*time.Millisecond)
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("renew after run end: err = %v, want a timeout (no reply)", err)
 	}
 }
 
