@@ -98,8 +98,15 @@ done/cancelled.
   `Run.CancelWithReason` (call it before cancelling the Chat context, which
   publishes a plain cancel); `pkg/rotation` keeps a long turn supplied with
   short-lived tokens. Wire details: [SPEC.md §12](SPEC.md#12-long-turns-v15).
-- NATS permissions for renew: agents subscribe `_RENEW.>`, callers publish
-  `_RENEW.>`.
+- Renew needs no extra NATS permission: the per-run subject is
+  `trx.agent.<name>.renew.<random>`, in the agent's own subject space (the
+  agent already subscribes `trx.agent.<name>.>`, callers already publish
+  there; other agents cannot listen). `Run.Renew` sends only to such a
+  subject of the run's agent (`agentclient.ValidRenewSubject`) and waits up
+  to `RenewTimeout` (12s). A renew carrying an older expiry than the
+  current token is refused (`stale_token`).
+- Cut reasons on cancel: `progress_idle`, `token_rotation_failed`,
+  `interrupted`, `time_cap`, `unavailable` (a required service was down).
 
 ### User context (protocol 1.3)
 
