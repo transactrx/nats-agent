@@ -186,6 +186,7 @@ func TestCancelWithReasonIsCut(t *testing.T) {
 		wire.ReasonTokenRotation: "stopped: access could not be renewed",
 		wire.ReasonInterrupted:   "interrupted",
 		wire.ReasonTimeCap:       "time limit reached",
+		wire.ReasonUnavailable:   "stopped: a required service was unavailable",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			var ap atomic.Pointer[Agent]
@@ -215,6 +216,7 @@ func TestCutReasonMapping(t *testing.T) {
 		{ErrTimeCap, wire.ReasonTimeCap},
 		{ErrInterrupted, wire.ReasonInterrupted},
 		{&CutError{Reason: wire.ReasonProgressIdle}, wire.ReasonProgressIdle},
+		{&CutError{Reason: wire.ReasonUnavailable}, wire.ReasonUnavailable},
 		{fmt.Errorf("wrapped: %w", &CutError{Reason: wire.ReasonTokenRotation}), wire.ReasonTokenRotation},
 		{errors.New("other"), ""},
 		{nil, ""},

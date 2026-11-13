@@ -31,8 +31,9 @@ const (
 	// DeadRunTimeout is how long a run may go without any event (agents
 	// heartbeat every ≤15s) before the client declares it dead.
 	DeadRunTimeout = 45 * time.Second
-	// RenewTimeout bounds one renew request/reply.
-	RenewTimeout = 5 * time.Second
+	// RenewTimeout bounds one renew request/reply. The agent's renew
+	// handler may make up to two fresh identity checks (5 s each).
+	RenewTimeout = 12 * time.Second
 )
 
 var (
@@ -267,7 +268,7 @@ func (r *Run) Cancel(ctx context.Context) (bool, error) {
 
 // CancelWithReason cancels this run as a cut by the caller's limits
 // (wire.ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
-// ReasonTimeCap): a 1.5 agent ends it with that reason instead of a user
+// ReasonTimeCap, ReasonUnavailable): a 1.5 agent ends it with that reason instead of a user
 // cancel. Older agents treat it as Cancel. Call it BEFORE cancelling the
 // Chat context: that path publishes a plain cancel, and the first cancel
 // to reach the agent decides how the run ends.

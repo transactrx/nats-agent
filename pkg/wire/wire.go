@@ -225,6 +225,9 @@ const (
 	ReasonSubagentTimeout = "subagent_timeout"
 	ReasonSubagentIdle    = "subagent_idle"
 	ReasonTokenRotation   = "token_rotation_failed"
+	// ReasonUnavailable: an operational stop, a service the turn needs was
+	// unavailable.
+	ReasonUnavailable = "unavailable"
 )
 
 // DataKindProgress (v1.5) is the data event kind whose payload is a
@@ -293,7 +296,8 @@ type CancelRequest struct {
 	RunID string `json:"runId"`
 	// Reason (v1.5, optional) marks the cancel as a cut by the caller's
 	// limits (ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
-	// ReasonTimeCap). Empty or unknown = a plain (user) cancel.
+	// ReasonTimeCap, ReasonUnavailable). Empty or unknown = a plain (user)
+	// cancel.
 	Reason string `json:"reason,omitempty"`
 }
 

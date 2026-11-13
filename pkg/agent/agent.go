@@ -160,6 +160,7 @@ var cutReasons = map[string]string{ // reason → fallback error text
 	wire.ReasonTokenRotation: "stopped: access could not be renewed",
 	wire.ReasonInterrupted:   "interrupted",
 	wire.ReasonTimeCap:       "time limit reached",
+	wire.ReasonUnavailable:   "stopped: a required service was unavailable",
 }
 
 // CutReason is the wire reason for why ctx (a run ctx) was cut: time_cap

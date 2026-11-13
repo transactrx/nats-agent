@@ -21,6 +21,7 @@ const (
 	renewWrongRun         = "wrong_run"
 	renewInvalidToken     = "invalid_token"
 	renewIdentityMismatch = "identity_mismatch"
+	renewStaleToken       = "stale_token"
 )
 
 // tokenHolder is a run's current IDT, swapped by accepted renews. Safe for
@@ -172,6 +173,13 @@ func (a *Agent) applyRenew(turn *Turn, body []byte) *wire.RenewResponse {
 	token := strings.TrimSpace(req.IDT)
 	if token == "" {
 		return reject(renewInvalidToken)
+	}
+	// Replay guard: a token expiring before the one the run holds (known
+	// from a previous renew) is an older token resent. Unknown = as before.
+	if req.ExpiresAtMs > 0 {
+		if cur, ok := turn.IDTExpiry(); ok && time.UnixMilli(req.ExpiresAtMs).Before(cur) {
+			return reject(renewStaleToken)
+		}
 	}
 	// Fresh check: a cached allow must not admit a token revoked since.
 	id, aerr := a.idt.AuthorizeFresh(token, turn.SessionID)

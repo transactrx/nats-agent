@@ -905,3 +905,10 @@ func TestRunRenewRefusesForeignSubject(t *testing.T) {
 		}
 	}
 }
+
+// The agent's renew handler may make two fresh identity checks (5 s each).
+func TestRenewTimeoutCoversTwoIdentityChecks(t *testing.T) {
+	if RenewTimeout != 12*time.Second {
+		t.Fatalf("RenewTimeout = %s, want 12s", RenewTimeout)
+	}
+}

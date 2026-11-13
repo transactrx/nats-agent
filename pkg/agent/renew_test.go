@@ -540,3 +540,44 @@ func TestRenewObserveModeAfterTokenExpiry(t *testing.T) {
 	close(release)
 	drainRun(run)
 }
+
+// A renew carrying an expiry earlier than the current token's (known from a
+// previous renew) is a replay of an older token: refused as stale_token.
+// Equal or later expiries are accepted; unknown expiries behave as before.
+func TestRenewRefusesStaleToken(t *testing.T) {
+	a, turns, release := startRenewAgent(t, testAgentOpts{renew: true})
+	run := chatAs(t, a, "IDT-x1.c")
+	turn := waitTurn(t, turns)
+	base := time.Now().Add(15 * time.Minute).Truncate(time.Millisecond)
+	send := func(tok string, exp time.Time) wire.RenewResponse {
+		req := wire.RenewRequest{RunID: run.Ack.RunID, IDT: tok}
+		if !exp.IsZero() {
+			req.ExpiresAtMs = exp.UnixMilli()
+		}
+		return renew(t, run, req)
+	}
+	if resp := send("IDT-x2.c", base); !resp.Applied {
+		t.Fatalf("first renew rejected: %+v", resp)
+	}
+	if resp := send("IDT-old.c", base.Add(-time.Minute)); resp.Applied || resp.Reason != "stale_token" {
+		t.Fatalf("older token = %+v, want refused stale_token", resp)
+	}
+	if turn.CurrentIDT() != "IDT-x2.c" {
+		t.Fatalf("CurrentIDT changed on stale renew: %q", turn.CurrentIDT())
+	}
+	if resp := send("IDT-x3.c", base); !resp.Applied {
+		t.Fatalf("equal expiry rejected: %+v", resp)
+	}
+	if resp := send("IDT-x4.c", base.Add(time.Minute)); !resp.Applied {
+		t.Fatalf("later expiry rejected: %+v", resp)
+	}
+	if resp := send("IDT-x5.c", time.Time{}); !resp.Applied {
+		t.Fatalf("renew without expiry rejected: %+v", resp)
+	}
+	// Current expiry now unknown: any expiry is accepted.
+	if resp := send("IDT-x6.c", base.Add(-10*time.Minute)); !resp.Applied {
+		t.Fatalf("renew after unknown expiry rejected: %+v", resp)
+	}
+	close(release)
+	drainRun(run)
+}
