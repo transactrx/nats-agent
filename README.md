@@ -104,7 +104,10 @@ done/cancelled.
   there; other agents cannot listen). `Run.Renew` sends only to such a
   subject of the run's agent (`agentclient.ValidRenewSubject`) and waits up
   to `RenewTimeout` (12s). A renew carrying an older expiry than the
-  current token is refused (`stale_token`).
+  current token is refused (`stale_token`). Stray replies from other
+  instances of the agent (an older build answers renew subjects with a 404
+  envelope) are skipped; only an explicit `{"applied":false}` is
+  `ErrRenewRejected`.
 - Cut reasons on cancel: `progress_idle`, `token_rotation_failed`,
   `interrupted`, `time_cap`, `unavailable` (a required service was down).
 

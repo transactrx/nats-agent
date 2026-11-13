@@ -221,7 +221,15 @@ More rules:
   new token and once to learn who the run's caller is. That is why the
   client waits 12 s (two checks of up to 5 s each).
 - Client errors: `ErrRenewUnsupported` (no valid renew subject, nothing
-  sent), `ErrRenewRejected` (wraps the reason), `ErrRenewTransport` (no reply).
+  sent), `ErrRenewRejected` (wraps the reason; only an explicit
+  `{"applied":false}`), `ErrRenewTransport` (no well-formed reply).
+- Another instance of the agent also receives each renew (service queue
+  group on `trx.agent.<name>.>`). Current instances stay silent; an older
+  build answers with a 404 service envelope, often first. The client skips
+  any reply with an error status or without a boolean `applied` and waits
+  for the run's own reply, so a mixed-version fleet (rolling deploy, a
+  regional twin on an older build) cannot turn an applied renew into a
+  refusal.
 
 **Why this subject.** The renew subject is
 `trx.agent.<agentName>.renew.<22 random base64url characters>`, one per

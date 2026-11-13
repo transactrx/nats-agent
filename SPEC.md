@@ -619,6 +619,15 @@ Reply:
   `agentclient.ValidRenewSubject`; `Run.Renew` refuses anything else with
   `ErrRenewUnsupported`). Callers wait up to 12 s for the reply (the agent
   may make two fresh identity checks of up to 5 s each).
+- Stray replies: every instance of the agent queue-subscribes
+  `trx.agent.<name>.>`, so one of them also receives each renew. Current
+  instances stay silent there, but an instance on an older build (rolling
+  deploy, a regional twin) answers with a service error envelope (`status`
+  header 404, body without `applied`), often before the owning run. Callers
+  MUST skip any reply that has an error status header or lacks a boolean
+  `applied`, and keep waiting for the run's reply; only an explicit
+  `{"applied": false}` is a refusal. No well-formed reply in time = unknown
+  outcome (Go: `ErrRenewTransport`), never a refusal.
 - `runId` must match the run (`wrong_run` otherwise). `expiresAtMs`
   (optional) is the new token's expiry, unix ms.
 - The token is validated with identity **without the decision cache**

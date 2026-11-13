@@ -83,6 +83,7 @@ type testAgentOpts struct {
 	renew    bool
 	observe  bool
 	identity string // validate subject; "" = IDT validation off
+	name     string // agent name; "" = derived from the test name
 	// handler overrides the default (block until release or ctx done).
 	handler ChatHandler
 }
@@ -92,8 +93,12 @@ type testAgentOpts struct {
 func startRenewAgent(t *testing.T, o testAgentOpts) (a *Agent, turns chan *Turn, release chan struct{}) {
 	t.Helper()
 	streamConn(t) // starts the embedded server
+	name := o.name
+	if name == "" {
+		name = "renew" + strings.ReplaceAll(t.Name(), "/", "_")
+	}
 	cfg := Config{
-		Name:          "renew" + strings.ReplaceAll(t.Name(), "/", "_"),
+		Name:          name,
 		Description:   "renew test",
 		NATSURL:       embedURL,
 		Renew:         o.renew,

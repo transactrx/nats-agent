@@ -912,3 +912,78 @@ func TestRenewTimeoutCoversTwoIdentityChecks(t *testing.T) {
 		t.Fatalf("RenewTimeout = %s, want 12s", RenewTimeout)
 	}
 }
+
+// rawRenewResponder answers every request on subject with each of replies,
+// in order (header may be nil).
+func rawRenewResponder(t *testing.T, subject string, replies ...*nats.Msg) {
+	t.Helper()
+	nc := testConn(t)
+	if _, err := nc.Subscribe(subject, func(m *nats.Msg) {
+		for _, r := range replies {
+			out := &nats.Msg{Subject: m.Reply, Header: r.Header, Data: r.Data}
+			_ = nc.PublishMsg(out)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// notFoundEnvelope is what an agent instance without the renew.> endpoint
+// (an older build in the same queue group) answers on a renew subject.
+func notFoundEnvelope(subject string) *nats.Msg {
+	return &nats.Msg{
+		Header: nats.Header{"status": []string{"404"}},
+		Data:   []byte(`{"status":404,"errorMessage":"subject: ` + subject + ` not found","apiStatusCode":404,"internalError":""}`),
+	}
+}
+
+func shortRenewTimeout(t *testing.T) {
+	t.Helper()
+	old := renewTimeout
+	renewTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { renewTimeout = old })
+}
+
+// A reply that is not a well-formed RenewResponse is never a rejection: the
+// agent may have applied the token. Alone, it ends as ErrRenewTransport.
+func TestRenewMalformedReplyIsNotRejection(t *testing.T) {
+	shortRenewTimeout(t)
+	for name, reply := range map[string]func(string) *nats.Msg{
+		"empty body":   func(string) *nats.Msg { return &nats.Msg{} },
+		"empty object": func(string) *nats.Msg { return &nats.Msg{Data: []byte(`{}`)} },
+		"not json":     func(string) *nats.Msg { return &nats.Msg{Data: []byte(`oops`)} },
+		"applied null": func(string) *nats.Msg { return &nats.Msg{Data: []byte(`{"applied":null}`)} },
+		"404 envelope": notFoundEnvelope,
+		"error status": func(string) *nats.Msg {
+			return &nats.Msg{Header: nats.Header{"status": []string{"500"}}, Data: []byte(`{"applied":false}`)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			subject := wire.AgentSubject("agentM", "renew.abcdefghijklmnopqrstuv"+strings.ReplaceAll(name, " ", ""))
+			rawRenewResponder(t, subject, reply(subject))
+			err := Renew(context.Background(), testConn(t), subject, wire.RenewRequest{RunID: "r", IDT: "tok"})
+			if errors.Is(err, ErrRenewRejected) || !errors.Is(err, ErrRenewTransport) {
+				t.Fatalf("Renew = %v, want ErrRenewTransport, not ErrRenewRejected", err)
+			}
+		})
+	}
+}
+
+// A stray framework reply arriving before the run's own answer is skipped:
+// the run's answer decides.
+func TestRenewSkipsStrayReplyBeforeAnswer(t *testing.T) {
+	subject := wire.AgentSubject("agentM", "renew.straythenapplied00")
+	rawRenewResponder(t, subject, notFoundEnvelope(subject), &nats.Msg{Data: []byte(`{"applied":true}`)})
+	if err := Renew(context.Background(), testConn(t), subject, wire.RenewRequest{RunID: "r", IDT: "tok"}); err != nil {
+		t.Fatalf("Renew = %v, want nil (the run applied it)", err)
+	}
+	subject = wire.AgentSubject("agentM", "renew.straythenrefused00")
+	rawRenewResponder(t, subject, notFoundEnvelope(subject), &nats.Msg{Data: []byte(`{"applied":false,"reason":"identity_mismatch"}`)})
+	err := Renew(context.Background(), testConn(t), subject, wire.RenewRequest{RunID: "r", IDT: "tok"})
+	if !errors.Is(err, ErrRenewRejected) || !strings.Contains(err.Error(), "identity_mismatch") {
+		t.Fatalf("Renew = %v, want ErrRenewRejected identity_mismatch", err)
+	}
+}

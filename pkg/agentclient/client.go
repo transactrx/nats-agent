@@ -43,8 +43,9 @@ var (
 	// wrapping error carries the agent's reason. Transport failures (no
 	// responders, timeout) are returned as other errors so callers can retry.
 	ErrRenewRejected = errors.New("agentclient: renew rejected")
-	// ErrRenewTransport: the renew got no reply (no responders, timeout,
-	// connection error); the wrapping error also carries the cause. The
+	// ErrRenewTransport: the renew got no well-formed reply (no responders,
+	// timeout, connection error, or only stray replies such as another
+	// instance's error envelope); the wrapping error also carries the cause. The
 	// outcome is unknown (on a timeout the agent may have applied the token
 	// and the reply was lost); retrying with the same token is safe.
 	ErrRenewTransport = errors.New("agentclient: renew transport error")
@@ -323,11 +324,18 @@ var renewTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Renew sends req to a run's renew subject (ChatAck.Caps.RenewSubject), for
 // callers that hold the subject without a Run. Empty subject →
-// ErrRenewUnsupported; refused → ErrRenewRejected wrapping the reason; no
-// reply within RenewTimeout → ErrRenewTransport wrapping the cause; ctx
-// ended → the ctx error. A renew after the run ended gets no reply (a
-// timeout, or no responders once the subscription is gone), so it also
-// surfaces as ErrRenewTransport.
+// ErrRenewUnsupported; refused (an explicit {"applied":false}) →
+// ErrRenewRejected wrapping the reason; no well-formed reply within
+// RenewTimeout → ErrRenewTransport wrapping the cause; ctx ended → the ctx
+// error. A renew after the run ended gets no reply (a timeout, or no
+// responders once nothing listens), so it also surfaces as ErrRenewTransport.
+//
+// The subject lies in the agent's subject space, which every instance of the
+// agent also queue-subscribes. An instance without the silent renew endpoint
+// (an older build) answers it with a framework error envelope, possibly
+// before the run's own answer. Such replies (error status header, or a body
+// without a boolean "applied") are skipped, never read as a rejection; if no
+// well-formed reply follows, the outcome is unknown: ErrRenewTransport.
 func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewRequest) error {
 	if subject == "" {
 		return ErrRenewUnsupported
@@ -336,23 +344,95 @@ func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewReq
 	if err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, RenewTimeout)
+	rctx, cancel := context.WithTimeout(ctx, renewTimeout)
 	defer cancel()
-	msg, err := nc.RequestWithContext(rctx, subject, data)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return fmt.Errorf("renew request to %s: %w", subject, cerr)
-		}
+	transport := func(err error) error {
 		return fmt.Errorf("%w: renew request to %s: %w", ErrRenewTransport, subject, err)
 	}
+	inbox := nc.NewRespInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		return transport(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if err := nc.PublishMsg(&nats.Msg{Subject: subject, Reply: inbox, Data: data}); err != nil {
+		return transport(err)
+	}
+	var stray []string
+	for {
+		msg, err := sub.NextMsgWithContext(rctx)
+		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("renew request to %s: %w", subject, cerr)
+			}
+			if len(stray) > 0 {
+				return fmt.Errorf("%w: renew request to %s: no well-formed reply (skipped %s): %w", ErrRenewTransport, subject, strings.Join(stray, "; "), err)
+			}
+			return transport(err)
+		}
+		if len(msg.Data) == 0 && msg.Header.Get(natsStatusHdr) == "503" {
+			return transport(nats.ErrNoResponders)
+		}
+		resp, ok := decodeRenewResponse(msg)
+		if !ok {
+			stray = append(stray, describeReply(msg))
+			continue
+		}
+		if !resp.Applied {
+			return fmt.Errorf("%w: %s", ErrRenewRejected, resp.Reason)
+		}
+		return nil
+	}
+}
+
+// Status headers: NATS's own (no responders) and nats-service's envelopes.
+const (
+	natsStatusHdr    = "Status"
+	serviceStatusHdr = "status"
+)
+
+// replyStatus is a reply's status header, "" when none.
+func replyStatus(msg *nats.Msg) string {
+	if st := msg.Header.Get(natsStatusHdr); st != "" {
+		return st
+	}
+	return msg.Header.Get(serviceStatusHdr)
+}
+
+// renewTimeout is RenewTimeout; tests shorten it.
+var renewTimeout = RenewTimeout
+
+// decodeRenewResponse accepts only a well-formed RenewResponse: no error
+// status header and a JSON object with a boolean "applied".
+func decodeRenewResponse(msg *nats.Msg) (wire.RenewResponse, bool) {
 	var resp wire.RenewResponse
+	if st := replyStatus(msg); st != "" && st != "200" {
+		return resp, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg.Data, &fields); err != nil {
+		return resp, false
+	}
+	var applied bool
+	if raw, ok := fields["applied"]; !ok || json.Unmarshal(raw, &applied) != nil || string(raw) == "null" {
+		return resp, false
+	}
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		return fmt.Errorf("decoding renew reply from %s: %w", subject, err)
+		return resp, false
 	}
-	if !resp.Applied {
-		return fmt.Errorf("%w: %s", ErrRenewRejected, resp.Reason)
+	return resp, true
+}
+
+// describeReply summarizes a skipped reply for the error message.
+func describeReply(msg *nats.Msg) string {
+	body := msg.Data
+	if len(body) > 120 {
+		body = body[:120]
 	}
-	return nil
+	if st := replyStatus(msg); st != "" {
+		return fmt.Sprintf("status %s %q", st, body)
+	}
+	return fmt.Sprintf("%q", body)
 }
 
 // ChatOptions tunes one chat turn. The zero value behaves exactly as Chat.
