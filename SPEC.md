@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.4 (draft)
+# NATS Agent Protocol — Specification v1.5 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -523,3 +523,191 @@ Same envelope as every transactrx service (`nats-service`
   discovers a peer and calls its `chat`/`invoke` like any other client,
   typically from inside a tool, subject to the caller's access level once
   permissions land.
+
+## 12. Long turns (v1.5)
+
+Protocol 1.5 lets a turn run as long as it keeps making progress, inside a
+caller-set budget, with short-lived tokens renewed mid-run. Every addition
+is optional; see §12.7.
+
+### 12.1 Capability opt-in
+
+Card `capabilities` gains two optional flags; the ack (§5.2) gains an
+optional `caps` object describing this run:
+
+```json
+"capabilities": { "streaming": true, "progress": true, "renew": true }
+```
+
+```json
+{ "accepted": true, "runId": "run_01HZY...", "caps": { "progress": true, "renewSubject": "trx.agent.copayAssistant.renew.Q2x0Yk..." } }
+```
+
+- `progress`: the agent emits progress frames (§12.3) and honors `budget`
+  (§12.2); callers may cut its turns on progress idleness. Callers MUST
+  NOT apply a no-progress cut to a run whose ack lacks `caps.progress`:
+  such an agent only promised pings (the Go client ignores
+  `ChatOptions.IdleWindow` for it).
+- `renew`: the agent accepts a fresh IDT mid-run (§12.4). The ack's
+  `caps.renewSubject` is present only when renew is available for this run.
+- `caps` is absent on agents that opted into neither, and on v1.4 agents.
+  Callers decide per run from `caps`, not from the card alone (a turn may
+  land on an older instance mid-rollout).
+
+### 12.2 Budget
+
+The chat request may carry the caller's remaining time:
+
+```json
+"budget": { "remainingMs": 2940000 }
+```
+
+A 1.5 agent ends the turn by `remainingMs` minus a 5 s margin (floor 1 s),
+so it can still send a clean terminal frame before the caller gives up.
+Callers can rely on this only when the card or ack advertises `progress`.
+If the handler does not end the turn itself, the runtime sends
+`error` with `errorStatus` 5002, `error` `"time limit reached"` and
+`reason:"time_cap"`. Absent `budget` = the agent's own limits, as before.
+
+### 12.3 Progress frames
+
+A `data` event (§5.3) of `kind:"progress"`:
+
+```json
+{ "runId": "run_01HZY...", "seq": 7, "type": "data", "kind": "progress", "payload": { "stage": "tool", "source": "sql", "detail": "querying claims" } }
+```
+
+- `stage` required (`model`, `tool`, `subagent`, …); `source`, `detail`
+  optional, display only.
+- At most one frame per 15 s per run; extra frames are dropped by the
+  sender. Frames are emitted only for real work, never from a timer.
+- For idle detection every event except `ping` counts as progress; pings
+  prove liveness only. A caller may cut a turn after its idle window passes
+  with no progress (`reason:"progress_idle"`).
+
+### 12.4 Renew
+
+A run with `caps.renewSubject` accepts a replacement IDT. The caller sends a
+NATS request to that subject:
+
+```json
+{ "runId": "run_01HZY...", "idt": "IDT-....", "expiresAtMs": 1794480000000 }
+```
+
+Reply:
+
+```json
+{ "applied": true }
+{ "applied": false, "reason": "identity_mismatch" }
+```
+
+- Subject rules: `trx.agent.<name>.renew.<22 random base64url characters>`,
+  one per run, in the agent's own subject space (`<name>` is the agent's
+  registered name, never a regional alias). It is subscribed on the owning
+  instance's connection before the ack is sent and unsubscribed when the
+  run ends; the agent's other instances stay silent on `renew.*` paths. A
+  renew that arrives as or after the run ends gets no reply: the caller sees
+  a timeout (Go: `ErrRenewTransport`). The subject is unguessable and is
+  only ever sent to the caller in the ack.
+- Why this space: an agent may already subscribe `trx.agent.<itsName>.>` and
+  its callers may already publish `trx.agent.<thatName>.>`, so renew needs
+  no extra NATS permission, and no other agent can subscribe to another
+  agent's renew subjects. `_INBOX` is never used for tokens (every service
+  may subscribe there).
+- Callers MUST send a token only to a subject of exactly that shape for the
+  agent they started the run on, with no wildcard (Go:
+  `agentclient.ValidRenewSubject`; `Run.Renew` refuses anything else with
+  `ErrRenewUnsupported`). Callers wait up to 12 s for the reply (the agent
+  may make two fresh identity checks of up to 5 s each).
+- Stray replies: every instance of the agent queue-subscribes
+  `trx.agent.<name>.>`, so one of them also receives each renew. Current
+  instances stay silent there, but an instance on an older build (rolling
+  deploy, a regional twin) answers with a service error envelope (`status`
+  header 404, body without `applied`), often before the owning run. Callers
+  MUST skip any reply that has an error status header or lacks a boolean
+  `applied`, and keep waiting for the run's reply; only an explicit
+  `{"applied": false}` is a refusal. No well-formed reply in time = unknown
+  outcome (Go: `ErrRenewTransport`), never a refusal.
+- `runId` must match the run (`wrong_run` otherwise). `expiresAtMs`
+  (optional) is the new token's expiry, unix ms.
+- The token is validated with identity **without the decision cache**
+  (`invalid_token` on failure), and must belong to the same user and account
+  as the run's token (`identity_mismatch`). A verified run requires a
+  verified token. With validation off or observe-only the run's admission
+  rule applies, but a token that identity resolves to another user or
+  account is still refused (compared with the caller first resolved for the
+  run). If identity never resolved the run's caller (observe-only or
+  fail-open without ids), a renew is accepted under the same rule as the
+  admission was; the random per-run subject bounds the exposure.
+  Malformed body = `bad_request`.
+- Replay guard: when `expiresAtMs` is set and earlier than the expiry of the
+  token the run holds (known from a previous renew), the renew is refused
+  (`stale_token`). Equal or later expiries are accepted; unknown expiries
+  are not compared.
+- Accepted: the agent uses the new token for every new onward call; calls
+  already in flight finish with the token they started with. The old token
+  is never revoked by the agent; it expires on its own.
+- A refused renew changes nothing; the run continues with its current token.
+
+### 12.5 Terminal reasons
+
+`done` and `error` events may carry `reason` when a limit, not the model,
+ended the turn. Clients ignore unknown values.
+
+| `reason` | Meaning |
+|---|---|
+| `time_cap` | Budget or safety cap reached |
+| `progress_idle` | No progress within the idle window |
+| `interrupted` | Agent instance shutting down |
+| `max_iterations` | Agent's tool-loop limit reached |
+| `subagent_timeout` | A consulted agent exceeded its time limit |
+| `subagent_idle` | A consulted agent stopped making progress |
+| `token_rotation_failed` | No fresh token could be delivered before the current one ran low |
+| `unavailable` | Operational stop: a service the turn needs was unavailable |
+
+Stored history messages (`sessionsGet` `messages[]`, §7) may carry
+`incomplete`: absent for a complete message, otherwise the reason it was cut
+short (a value above, or `error`). Optional; clients that ignore it show the
+partial text as before.
+
+A cancel request (§5.4) may carry an optional `reason`:
+`{ "runId": "run_01HZY...", "reason": "progress_idle" }`. A known cut reason
+(`progress_idle`, `token_rotation_failed`, `interrupted`, `time_cap`,
+`unavailable`) means
+the caller's limits ended the turn: a 1.5 agent ends the run with an `error`
+event carrying that `reason` (so it can keep its partial work) instead of
+`done`/`cancelled`. Empty or unknown `reason` = a plain cancel, as before.
+The cancel reply is unchanged. The cancel is as unauthenticated as it always
+was: the reason only relabels a cancel that was already possible. When
+cancels race, the first cause decides: a cut stays a cut if a plain cancel
+follows, and a plain cancel stays a cancel if a cut follows. Callers that
+cut a turn send the reasoned cancel BEFORE abandoning their own stream
+(Go: call `CancelWithReason` before cancelling the `Chat` context, whose
+cancel path publishes a plain cancel).
+
+### 12.6 Token rotation (non-normative)
+
+A caller holding a short-lived token schedules the next rotation from the
+expiry identity actually returned (never from what it asked for), renews
+when the current token has 8 min left, and retries with backoff (5 s, 10 s,
+20 s, then 30 s) until 2 min are left; then it ends the turn with
+`token_rotation_failed`. Go: `pkg/rotation`.
+
+### 12.7 Compatibility
+
+- Every 1.5 field, event kind and message is optional. No receiver requires
+  any of them.
+- A v1.4 agent ignores `budget`, never sends `caps`, progress frames or
+  `reason`: callers keep today's behavior for that run (no idle cut, no
+  renew, the first token for the whole turn).
+- A v1.4 caller ignores `caps`, the `progress` data kind (unknown kinds are
+  ignored, §5.3) and `reason`; it never sends `budget` or renews.
+- An agent on 1.5 that has not opted in still honours a request `budget`,
+  a reasoned cancel (any of the five cut reasons) and its own shutdown
+  (`InterruptAll`): those end the turn with an `error` carrying `reason`
+  (`time_cap`, `progress_idle`, `token_rotation_failed`, `interrupted`,
+  `unavailable`).
+  Everything else (`caps`, progress frames, renew) is emitted only after
+  opt-in.
+- The Go client gates its no-progress cut on the ack's `caps.progress`
+  (§12.1): runs on agents without it behave exactly as plain `Chat`.

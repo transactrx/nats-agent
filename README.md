@@ -75,6 +75,42 @@ and never reaches `OnChat`. Env contract (`IDTValidationFromEnv`):
 | `IDT_VALIDATE_TIMEOUT_SECONDS` | Per-call timeout (default 5s) |
 | `IDT_VALIDATE_CACHE_SECONDS` | Cache TTL, keyed on sha256(token)+session+app+function (default 300s; deny and observe-only results are never cached) |
 
+### Long turns (protocol 1.5)
+
+Adopting 1.5: bumping the library changes nothing until you set
+`Config.Progress`/`Config.Renew`, with these exceptions: a request `budget`
+is honoured (handler ctx deadline `remainingMs` − 5s, cause
+`agent.ErrTimeCap`); a cancel carrying a cut reason ends the turn as a cut
+(`agent.CutReason(ctx)`); `InterruptAll` ends turns as interrupted. In those
+cases the turn ends with an `error` carrying `reason` instead of
+done/cancelled.
+
+- `Config.Progress: true` — call `stream.Progress(stage, detail)` on real
+  work (model output, tool start/end); at most one frame per 15s is sent.
+  Callers may then cut a turn that stops progressing (pings don't count).
+- `Config.Renew: true` — the run accepts fresh tokens mid-turn. Use
+  `turn.CurrentIDT()` (not `turn.Identity.IDT`) for each new onward call, or
+  `turn.OnRenew(fn)` to be told; calls in flight keep their token.
+- Turns cut by a limit end with `reason` (`time_cap`, `interrupted`, …);
+  `agent.InterruptAll()` ends running turns on shutdown.
+- Callers: `agentclient.ChatWith(…, ChatOptions{IdleWindow})` (applies
+  only to agents whose ack declares progress), `Run.Caps`, `Run.Renew`,
+  `Run.CancelWithReason` (call it before cancelling the Chat context, which
+  publishes a plain cancel); `pkg/rotation` keeps a long turn supplied with
+  short-lived tokens. Wire details: [SPEC.md §12](SPEC.md#12-long-turns-v15).
+- Renew needs no extra NATS permission: the per-run subject is
+  `trx.agent.<name>.renew.<random>`, in the agent's own subject space (the
+  agent already subscribes `trx.agent.<name>.>`, callers already publish
+  there; other agents cannot listen). `Run.Renew` sends only to such a
+  subject of the run's agent (`agentclient.ValidRenewSubject`) and waits up
+  to `RenewTimeout` (12s). A renew carrying an older expiry than the
+  current token is refused (`stale_token`). Stray replies from other
+  instances of the agent (an older build answers renew subjects with a 404
+  envelope) are skipped; only an explicit `{"applied":false}` is
+  `ErrRenewRejected`.
+- Cut reasons on cancel: `progress_idle`, `token_rotation_failed`,
+  `interrupted`, `time_cap`, `unavailable` (a required service was down).
+
 ### User context (protocol 1.3)
 
 Requests may carry `context` `{timeZone, userName, locale}` — display only,
