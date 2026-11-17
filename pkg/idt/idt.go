@@ -221,6 +221,17 @@ func forbidden(reason string) *nats_service.NatsServiceError {
 // the session id). Returns the caller Identity on allow, or a 403 envelope.
 // Pass-through modes return Verified=false, never an error.
 func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.NatsServiceError) {
+	return v.authorize(token, scope, true)
+}
+
+// AuthorizeFresh is Authorize without reading the decision cache: identity
+// is always asked, so a token revoked since its last cached allow is
+// refused. Used to accept a rotated token mid-run.
+func (v *Validator) AuthorizeFresh(token, scope string) (Identity, *nats_service.NatsServiceError) {
+	return v.authorize(token, scope, false)
+}
+
+func (v *Validator) authorize(token, scope string, useCache bool) (Identity, *nats_service.NatsServiceError) {
 	token = strings.TrimSpace(token)
 	if !v.cfg.Enabled {
 		return Identity{IDT: token}, nil
@@ -240,7 +251,7 @@ func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.Nats
 	}
 
 	key := cacheKey(token, scope, appID, fnID)
-	if v.cfg.CacheTTL > 0 {
+	if useCache && v.cfg.CacheTTL > 0 {
 		v.mu.Lock()
 		if e, ok := v.cache[key]; ok && time.Now().Before(e.expires) {
 			v.mu.Unlock()
@@ -284,7 +295,13 @@ func (v *Validator) Authorize(token, scope string) (Identity, *nats_service.Nats
 		if v.cfg.ObserveOnly {
 			v.logger.Printf("IDT_METRIC event=validate.observe decision=deny reason=%s agent=%s function=%s idtid=%q user=%s",
 				reason, appID, fnID, idPrefix(token), resp.UserID)
-			return Identity{IDT: token}, nil
+			id := Identity{IDT: token}
+			if !useCache {
+				// Fresh checks (renew) compare callers, so they get the ids
+				// identity resolved; Authorize keeps its admission shape.
+				id.UserID, id.AccountID = resp.UserID, resp.AccountID
+			}
+			return id, nil
 		}
 		v.logger.Printf("IDT_METRIC event=validate.deny reason=%s agent=%s function=%s idtid=%q user=%s account=%s",
 			reason, appID, fnID, idPrefix(token), resp.UserID, resp.AccountID)
@@ -331,8 +348,28 @@ func WithToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, tokenCtxKey{}, token)
 }
 
-// TokenFromContext returns the token set by WithToken, or "".
+type tokenSourceCtxKey struct{}
+
+// WithTokenSource returns a context whose token is read from src at call
+// time, so a long-lived context follows a token that is renewed while it is
+// in use. TokenFromContext (and so every authenticated call) asks src first
+// and falls back to the WithToken value when src returns "". A WithToken set
+// on a derived context does not override the source. nil src is a no-op.
+func WithTokenSource(ctx context.Context, src func() string) context.Context {
+	if src == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenSourceCtxKey{}, src)
+}
+
+// TokenFromContext returns the token from the WithTokenSource source, else
+// the token set by WithToken, or "".
 func TokenFromContext(ctx context.Context) string {
+	if src, ok := ctx.Value(tokenSourceCtxKey{}).(func() string); ok {
+		if v := src(); v != "" {
+			return v
+		}
+	}
 	v, _ := ctx.Value(tokenCtxKey{}).(string)
 	return v
 }

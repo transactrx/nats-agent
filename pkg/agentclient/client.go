@@ -6,7 +6,10 @@ package agentclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -14,6 +17,7 @@ import (
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
 	idtpkg "github.com/transactrx/nats-agent/pkg/idt"
+	"github.com/transactrx/nats-agent/pkg/progress"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
 
@@ -27,6 +31,24 @@ const (
 	// DeadRunTimeout is how long a run may go without any event (agents
 	// heartbeat every ≤15s) before the client declares it dead.
 	DeadRunTimeout = 45 * time.Second
+	// RenewTimeout bounds one renew request/reply. The agent's renew
+	// handler may make up to two fresh identity checks (5 s each).
+	RenewTimeout = 12 * time.Second
+)
+
+var (
+	// ErrRenewUnsupported: the run (or agent) offers no renew subject.
+	ErrRenewUnsupported = errors.New("agentclient: run does not support renew")
+	// ErrRenewRejected: the agent answered and refused the token; the
+	// wrapping error carries the agent's reason. Transport failures (no
+	// responders, timeout) are returned as other errors so callers can retry.
+	ErrRenewRejected = errors.New("agentclient: renew rejected")
+	// ErrRenewTransport: the renew got no well-formed reply (no responders,
+	// timeout, connection error, or only stray replies such as another
+	// instance's error envelope); the wrapping error also carries the cause. The
+	// outcome is unknown (on a timeout the agent may have applied the token
+	// and the reply was lost); retrying with the same token is safe.
+	ErrRenewTransport = errors.New("agentclient: renew transport error")
 )
 
 // ServiceError is a protocol-level error reply from an agent (§9 envelope).
@@ -143,7 +165,18 @@ func WithIDT(ctx context.Context, idt string) context.Context {
 	return idtpkg.WithToken(ctx, idt)
 }
 
-// IDTFromContext returns the token set by WithIDT, or "".
+// WithIDTSource returns a context whose token is read from src on every
+// call, so a long turn picks up a renewed token for its next request. It
+// applies to everything that reads the token from ctx (Chat, Invoke,
+// Sessions*, toolclient runs). When src returns "" the WithIDT value is used.
+// A WithIDT/WithToken set on a derived context does not override the
+// source. nil src is a no-op.
+func WithIDTSource(ctx context.Context, src func() string) context.Context {
+	return idtpkg.WithTokenSource(ctx, src)
+}
+
+// IDTFromContext returns the token from the WithIDTSource source, else the
+// one set by WithIDT, or "".
 func IDTFromContext(ctx context.Context) string {
 	return idtpkg.TokenFromContext(ctx)
 }
@@ -216,9 +249,13 @@ func (c *Client) Ping(ctx context.Context, agent string) (*wire.PingResponse, er
 // Run is one live chat turn: the ack plus the event stream. The Events
 // channel closes after the terminal event (which is always delivered last).
 // Transport pings are consumed internally for liveness and not delivered.
+// Events must be drained until the terminal event: the reader goroutine
+// blocks on a full channel.
 type Run struct {
 	Ack    wire.ChatAck
 	Events <-chan wire.AgentEvent
+	// Caps is Ack.Caps, zero when the agent sent none (older agents).
+	Caps wire.AckCaps
 
 	client *Client
 	agent  string
@@ -230,12 +267,196 @@ func (r *Run) Cancel(ctx context.Context) (bool, error) {
 	return r.client.Cancel(ctx, r.agent, r.Ack.RunID)
 }
 
+// CancelWithReason cancels this run as a cut by the caller's limits
+// (wire.ReasonProgressIdle, ReasonTokenRotation, ReasonInterrupted,
+// ReasonTimeCap, ReasonUnavailable): a 1.5 agent ends it with that reason instead of a user
+// cancel. Older agents treat it as Cancel. Call it BEFORE cancelling the
+// Chat context: that path publishes a plain cancel, and the first cancel
+// to reach the agent decides how the run ends.
+func (r *Run) CancelWithReason(ctx context.Context, reason string) (bool, error) {
+	return r.client.CancelWithReason(ctx, r.agent, r.Ack.RunID, reason)
+}
+
+// Renew hands the running turn a fresh token (no expiry sent).
+// ErrRenewUnsupported when the agent offered no renew subject.
+func (r *Run) Renew(ctx context.Context, idt string) error {
+	return r.RenewWithExpiry(ctx, idt, time.Time{})
+}
+
+// RenewWithExpiry is Renew carrying the new token's expiry (zero time = none).
+// The ack's renew subject must be a renew subject of the agent this run was
+// started on (ValidRenewSubject); otherwise ErrRenewUnsupported and nothing
+// is sent.
+func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Time) error {
+	if r.Caps.RenewSubject == "" || !ValidRenewSubject(r.agent, r.Caps.RenewSubject) {
+		return ErrRenewUnsupported
+	}
+	req := wire.RenewRequest{RunID: r.Ack.RunID, IDT: idt}
+	if !expiresAt.IsZero() {
+		req.ExpiresAtMs = expiresAt.UnixMilli()
+	}
+	return Renew(ctx, r.client.nc, r.Caps.RenewSubject, req)
+}
+
+// ValidRenewSubject reports whether subject is a renew subject of agent:
+// exactly trx.agent.<name>.renew.<token>, token non-empty base64url
+// characters (no wildcard, whitespace or further dots). agent may be the
+// base name or a regional alias <name>_<region>; the subject is built from
+// the base name either way. Send a token only to a subject that passes.
+func ValidRenewSubject(agent, subject string) bool {
+	if agent == "" {
+		return false
+	}
+	names := []string{agent}
+	if i := strings.LastIndexByte(agent, '_'); i > 0 {
+		names = append(names, agent[:i]) // regional alias → base name
+	}
+	for _, name := range names {
+		prefix := wire.AgentSubject(name, "renew.")
+		if tok, ok := strings.CutPrefix(subject, prefix); ok && renewTokenRe.MatchString(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+var renewTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// Renew sends req to a run's renew subject (ChatAck.Caps.RenewSubject), for
+// callers that hold the subject without a Run. Empty subject →
+// ErrRenewUnsupported; refused (an explicit {"applied":false}) →
+// ErrRenewRejected wrapping the reason; no well-formed reply within
+// RenewTimeout → ErrRenewTransport wrapping the cause; ctx ended → the ctx
+// error. A renew after the run ended gets no reply (a timeout, or no
+// responders once nothing listens), so it also surfaces as ErrRenewTransport.
+//
+// The subject lies in the agent's subject space, which every instance of the
+// agent also queue-subscribes. An instance without the silent renew endpoint
+// (an older build) answers it with a framework error envelope, possibly
+// before the run's own answer. Such replies (error status header, or a body
+// without a boolean "applied") are skipped, never read as a rejection; if no
+// well-formed reply follows, the outcome is unknown: ErrRenewTransport.
+func Renew(ctx context.Context, nc *nats.Conn, subject string, req wire.RenewRequest) error {
+	if subject == "" {
+		return ErrRenewUnsupported
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	rctx, cancel := context.WithTimeout(ctx, renewTimeout)
+	defer cancel()
+	transport := func(err error) error {
+		return fmt.Errorf("%w: renew request to %s: %w", ErrRenewTransport, subject, err)
+	}
+	inbox := nc.NewRespInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		return transport(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if err := nc.PublishMsg(&nats.Msg{Subject: subject, Reply: inbox, Data: data}); err != nil {
+		return transport(err)
+	}
+	var stray []string
+	for {
+		msg, err := sub.NextMsgWithContext(rctx)
+		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("renew request to %s: %w", subject, cerr)
+			}
+			if len(stray) > 0 {
+				return fmt.Errorf("%w: renew request to %s: no well-formed reply (skipped %s): %w", ErrRenewTransport, subject, strings.Join(stray, "; "), err)
+			}
+			return transport(err)
+		}
+		if len(msg.Data) == 0 && msg.Header.Get(natsStatusHdr) == "503" {
+			return transport(nats.ErrNoResponders)
+		}
+		resp, ok := decodeRenewResponse(msg)
+		if !ok {
+			stray = append(stray, describeReply(msg))
+			continue
+		}
+		if !resp.Applied {
+			return fmt.Errorf("%w: %s", ErrRenewRejected, resp.Reason)
+		}
+		return nil
+	}
+}
+
+// Status headers: NATS's own (no responders) and nats-service's envelopes.
+const (
+	natsStatusHdr    = "Status"
+	serviceStatusHdr = "status"
+)
+
+// replyStatus is a reply's status header, "" when none.
+func replyStatus(msg *nats.Msg) string {
+	if st := msg.Header.Get(natsStatusHdr); st != "" {
+		return st
+	}
+	return msg.Header.Get(serviceStatusHdr)
+}
+
+// renewTimeout is RenewTimeout; tests shorten it.
+var renewTimeout = RenewTimeout
+
+// decodeRenewResponse accepts only a well-formed RenewResponse: no error
+// status header and a JSON object with a boolean "applied".
+func decodeRenewResponse(msg *nats.Msg) (wire.RenewResponse, bool) {
+	var resp wire.RenewResponse
+	if st := replyStatus(msg); st != "" && st != "200" {
+		return resp, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg.Data, &fields); err != nil {
+		return resp, false
+	}
+	var applied bool
+	if raw, ok := fields["applied"]; !ok || json.Unmarshal(raw, &applied) != nil || string(raw) == "null" {
+		return resp, false
+	}
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return resp, false
+	}
+	return resp, true
+}
+
+// describeReply summarizes a skipped reply for the error message.
+func describeReply(msg *nats.Msg) string {
+	body := msg.Data
+	if len(body) > 120 {
+		body = body[:120]
+	}
+	if st := replyStatus(msg); st != "" {
+		return fmt.Sprintf("status %s %q", st, body)
+	}
+	return fmt.Sprintf("%q", body)
+}
+
+// ChatOptions tunes one chat turn. The zero value behaves exactly as Chat.
+type ChatOptions struct {
+	// IdleWindow > 0 cuts the run when no progress (any event but a ping)
+	// arrives for this long: the client publishes a best-effort cancel
+	// (reason progress_idle) and ends the stream with an error event,
+	// Reason wire.ReasonProgressIdle. It applies only to agents whose ack
+	// declares progress (Caps.Progress); for others it is ignored.
+	// 0 = no idle cut.
+	IdleWindow time.Duration
+}
+
 // Chat starts a streaming chat turn. If req.StreamSubject is empty, a unique
 // inbox is generated. The returned Run's Events channel delivers everything
 // from start through the terminal event; if the agent goes silent past
 // DeadRunTimeout or ctx is cancelled, the client synthesizes a terminal
 // error event (and, for ctx cancellation, fires a best-effort cancel).
 func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (*Run, error) {
+	return c.ChatWith(ctx, agent, req, ChatOptions{})
+}
+
+// ChatWith is Chat with options (see ChatOptions).
+func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatRequest, o ChatOptions) (*Run, error) {
 	if len(req.Message.Content) == 0 {
 		return nil, fmt.Errorf("chat request needs a message with content")
 	}
@@ -258,48 +479,51 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 
 	out := make(chan wire.AgentEvent, 64)
 	run := &Run{Ack: *ack, Events: out, client: c, agent: agent}
+	if ack.Caps != nil {
+		run.Caps = *ack.Caps
+	}
+
+	// The no-progress cut applies only to agents that declared progress;
+	// others promised pings only and run exactly as with Chat.
+	window := o.IdleWindow
+	if !run.Caps.Progress {
+		window = 0
+	}
+	r := newStreamReader(ack.RunID, window, msgs, out)
+	r.cancelRemote = func(reason string) {
+		data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID, Reason: reason})
+		_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
+	}
 
 	go func() {
 		defer sub.Unsubscribe()
 		defer close(out)
+		defer r.stop()
 		dead := time.NewTimer(DeadRunTimeout)
 		defer dead.Stop()
-
-		terminate := func(message string) {
-			out <- wire.AgentEvent{
-				RunID: ack.RunID, Type: wire.EventError,
-				Error: message, ErrorStatus: wire.CodeUpstream,
+		r.resetDead = func() {
+			if !dead.Stop() {
+				<-dead.C
 			}
+			dead.Reset(DeadRunTimeout)
 		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				// Best-effort server-side cancel, then end the local stream.
-				data, _ := json.Marshal(wire.CancelRequest{RunID: ack.RunID})
-				_ = c.nc.Publish(wire.AgentSubject(agent, "cancel"), data)
-				terminate("context cancelled: " + ctx.Err().Error())
+				r.cancelRemote("")
+				r.terminate("context cancelled: "+ctx.Err().Error(), "")
 				return
 			case <-dead.C:
-				terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout))
+				r.terminate(fmt.Sprintf("run dead: no events for %s", DeadRunTimeout), "")
 				return
+			case <-r.idle:
+				if r.onIdle() {
+					return
+				}
 			case m := <-msgs:
-				var ev wire.AgentEvent
-				if err := json.Unmarshal(m.Data, &ev); err != nil {
-					continue
-				}
-				if ev.RunID != "" && ev.RunID != ack.RunID {
-					continue // stray traffic on a shared stream subject
-				}
-				if !dead.Stop() {
-					<-dead.C
-				}
-				dead.Reset(DeadRunTimeout)
-				if ev.Type == wire.EventPing {
-					continue
-				}
-				out <- ev
-				if ev.IsTerminal() {
+				if r.onMsg(m) {
 					return
 				}
 			}
@@ -309,11 +533,145 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 	return run, nil
 }
 
+// streamReader is the per-run state of ChatWith's reader goroutine. The
+// idle decision lives here so every path applies the same rule: the run is
+// cut only when the watcher has expired, no progress frame was handled since,
+// and none is queued.
+type streamReader struct {
+	runID  string
+	window time.Duration
+	msgs   <-chan *nats.Msg
+	out    chan<- wire.AgentEvent
+	// watcher is one-shot; revive replaces it. nil (and idle nil, never
+	// ready) without an idle window.
+	watcher      *progress.Watcher
+	idle         <-chan struct{}
+	resetDead    func()
+	cancelRemote func(reason string) // best-effort cancel publish
+	// newWatcher builds every watcher of this run (test seam: a manual
+	// clock). beforeObserve, nil outside tests, runs just before Observe.
+	newWatcher    func(time.Duration) *progress.Watcher
+	beforeObserve func()
+}
+
+func newStreamReader(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent) *streamReader {
+	return newStreamReaderWith(runID, window, msgs, out, progress.NewWatcher)
+}
+
+func newStreamReaderWith(runID string, window time.Duration, msgs <-chan *nats.Msg, out chan<- wire.AgentEvent, newWatcher func(time.Duration) *progress.Watcher) *streamReader {
+	r := &streamReader{runID: runID, window: window, msgs: msgs, out: out, resetDead: func() {}, cancelRemote: func(string) {}, newWatcher: newWatcher}
+	if window > 0 {
+		r.watcher = newWatcher(window)
+		r.idle = r.watcher.Expired()
+	}
+	return r
+}
+
+// stop releases the current watcher.
+func (r *streamReader) stop() {
+	if r.watcher != nil {
+		r.watcher.Stop()
+	}
+}
+
+func (r *streamReader) expired() bool {
+	if r.watcher == nil {
+		return false
+	}
+	select {
+	case <-r.watcher.Expired():
+		return true
+	default:
+		return false
+	}
+}
+
+// revive replaces an expired watcher with a fresh one for the same window,
+// keeping the last stage. The one place that turns "expired, but progress
+// arrived" back into a live window.
+func (r *streamReader) revive() {
+	old := r.watcher
+	r.watcher = r.newWatcher(r.window)
+	if stage := old.LastStage(); stage != "" {
+		r.watcher.Touch(stage)
+	}
+	old.Stop()
+	r.idle = r.watcher.Expired()
+}
+
+func (r *streamReader) terminate(message, reason string) {
+	r.out <- wire.AgentEvent{
+		RunID: r.runID, Type: wire.EventError,
+		Error: message, ErrorStatus: wire.CodeUpstream, Reason: reason,
+	}
+}
+
+// onMsg handles one stream frame; true when the run is over (terminal
+// delivered). Progress after the watcher expired revives it.
+func (r *streamReader) onMsg(m *nats.Msg) bool {
+	var ev wire.AgentEvent
+	if err := json.Unmarshal(m.Data, &ev); err != nil {
+		return false
+	}
+	if ev.RunID != "" && ev.RunID != r.runID {
+		return false // stray traffic on a shared stream subject
+	}
+	r.resetDead()
+	if r.watcher != nil {
+		if r.beforeObserve != nil {
+			r.beforeObserve()
+		}
+		r.watcher.Observe(&ev)
+		// Checked after Observe: the window may end right before it, and
+		// Observe is then a no-op on the expired watcher.
+		if ev.IsProgress() && r.expired() {
+			r.revive()
+			r.watcher.Observe(&ev)
+		}
+	}
+	if ev.Type == wire.EventPing {
+		return false
+	}
+	r.out <- ev
+	return ev.IsTerminal()
+}
+
+// onIdle runs when the watcher expired. Frames already queued arrived in
+// time (the reader was slow, not the agent), so they are handled first; a
+// progress frame among them revives the watcher and the run goes on, a
+// terminal ends it normally. Only with nothing (or only pings) queued is
+// the run cut. true when the run is over.
+func (r *streamReader) onIdle() bool {
+	for r.expired() {
+		select {
+		case m := <-r.msgs:
+			if r.onMsg(m) {
+				return true
+			}
+		default:
+			message := fmt.Sprintf("run idle: no progress for %s", r.window)
+			if stage := r.watcher.LastStage(); stage != "" {
+				message += " (last stage: " + stage + ")"
+			}
+			r.cancelRemote(wire.ReasonProgressIdle)
+			r.terminate(message, wire.ReasonProgressIdle)
+			return true
+		}
+	}
+	return false
+}
+
 // Cancel asks all instances of an agent to cancel a run; the owner replies.
 // Returns false (without error) when nothing owns the run — already
 // finished, unknown, or the owner died.
 func (c *Client) Cancel(ctx context.Context, agent, runID string) (bool, error) {
-	data, err := json.Marshal(wire.CancelRequest{RunID: runID})
+	return c.CancelWithReason(ctx, agent, runID, "")
+}
+
+// CancelWithReason is Cancel carrying a cut reason (see Run.CancelWithReason);
+// "" = Cancel.
+func (c *Client) CancelWithReason(ctx context.Context, agent, runID, reason string) (bool, error) {
+	data, err := json.Marshal(wire.CancelRequest{RunID: runID, Reason: reason})
 	if err != nil {
 		return false, err
 	}

@@ -10,7 +10,7 @@ func TestCardCarriesCategory(t *testing.T) {
 	if card.Category != "Operations" {
 		t.Fatalf("Category = %q, want Operations", card.Category)
 	}
-	if card.ProtocolVersion != "1.4" {
-		t.Fatalf("ProtocolVersion = %q, want 1.4", card.ProtocolVersion)
+	if card.ProtocolVersion != "1.5" {
+		t.Fatalf("ProtocolVersion = %q, want 1.5", card.ProtocolVersion)
 	}
 }
