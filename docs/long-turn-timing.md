@@ -142,7 +142,7 @@ flowchart TD
     D --> P{"Type is ping?"}
     P -- "yes" --> L["Liveness only: not delivered, idle window unchanged"]
     P -- "no" --> G["Progress: reset idle window, deliver to Run.Events"]
-    W{"Idle window passed with no progress?"} -- "no" --> K["Keep reading"]
+    W{"Idle window passed with no progress? (must exceed the agent's longest quiet stretch + 15 s)"} -- "no" --> K["Keep reading"]
     W -- "yes" --> Q{"Frames already queued?"}
     Q -- "progress queued" --> G
     Q -- "nothing queued" --> X["Publish cancel with reason progress_idle"]
@@ -476,3 +476,11 @@ can land on an older instance.
 | Renew subject random part | 16 bytes = 22 base64url characters | `pkg/agent/renew.go` |
 | Rotation backoff | 5 s, doubling, max 30 s | `pkg/rotation/rotator.go` |
 | Rotation `RotateBefore` / `GiveUpBefore` | no default; design values 8 min / 2 min | `pkg/rotation/rotator.go` |
+
+How these numbers bind the services that use the library:
+
+- **Progress throttle (15 s).** A caller's idle window must be longer than the longest stretch in which the agent has nothing to report, plus 15 s. For RSAssistant that stretch is one silent model call (`AI_STREAM_STALL_SECONDS`, 300 s), so its callers keep windows ≥ 345 s (480 s by default).
+- **Budget margin (5 s).** Every agent on the library cuts itself 5 s before its budget. Callers rely on it: agentExecution keeps 10 s back (15 s total), and the scheduler keeps nothing back but treats an agent timeout within 10 s of its deadline as the run's own timeout. Changing this constant changes every agent at once; check both callers first.
+- **Ping (10 s) and dead-run timeout (45 s).** The dead-run timeout must stay well above the ping interval plus the check interval (5 s), or a quiet, working run is declared dead.
+
+The full cross-service map (every timing value and the rules that tie them) is in RSAssistant `docs/long-turn-timing.md`, section "Timing dependencies".
