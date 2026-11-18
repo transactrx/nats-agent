@@ -113,7 +113,7 @@ type Config struct {
 	// env AGENT_ORCHESTRATOR=true turns it on.
 	Orchestrator bool
 	// MaxDelegationDepth is the deepest inbound delegation depth this agent
-	// accepts; deeper requests are refused (400, code 4003). 0 = 1.
+	// accepts; deeper requests are refused (400, code 4003). ≤0 = 1.
 	MaxDelegationDepth int
 
 	// Access registers this agent with the identity model (card "access").
@@ -231,10 +231,10 @@ func (a *Agent) ackCaps() *wire.AckCaps {
 	return &wire.AckCaps{Progress: a.cfg.Progress}
 }
 
-// applyDelegationDefaults fills MaxDelegationDepth (0 = 1) and the
+// applyDelegationDefaults fills MaxDelegationDepth (≤0 = 1) and the
 // AGENT_ORCHESTRATOR env fallback (only when the field is false).
 func applyDelegationDefaults(cfg *Config) {
-	if cfg.MaxDelegationDepth == 0 {
+	if cfg.MaxDelegationDepth <= 0 {
 		cfg.MaxDelegationDepth = 1
 	}
 	if !cfg.Orchestrator {

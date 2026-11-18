@@ -1274,6 +1274,21 @@ func TestToolRunCarriesDepth(t *testing.T) {
 	}
 }
 
+func TestToolHostIgnoresHops(t *testing.T) {
+	got := make(chan int, 1)
+	tc := hostTool(t, hookTool{name: "hopstool", fn: func(_ context.Context, call tool.Call) error {
+		got <- call.Delegation
+		return nil
+	}})
+	req := wire.ToolRunRequest{Input: map[string]any{}, Metadata: map[string]any{"hops": 3}}
+	if _, err := tc.Run(context.Background(), "hopstool", req, 0); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if v := <-got; v != 0 {
+		t.Fatalf("depth = %d, want 0 (tool runs ignore metadata.hops)", v)
+	}
+}
+
 func TestToolCannotCallAgent(t *testing.T) {
 	leaf := startDepthAgent(t, "leafToolB", false, nil)
 	errs := make(chan error, 4)

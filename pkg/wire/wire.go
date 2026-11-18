@@ -450,8 +450,8 @@ type ToolRunResponse struct {
 const (
 	CodeInvalidBody     = 4001
 	CodeMissingField    = 4002
-	CodeForbidden       = 4031
 	CodeDelegationDepth = 4003
+	CodeForbidden       = 4031
 	CodeUnknownSession  = 4041
 	CodeUnknownRun      = 4042
 	CodeBusy            = 4291

@@ -738,13 +738,16 @@ is a leaf: if an orchestrator asks Agent1, Agent1 must not ask Agent2.
 - `depth` is the number of agent-to-agent hops already taken to reach this
   turn. Absent or null = 0 (an entry call: UI, BFF, scheduler, worker).
   Negative = 0.
-- Legacy: `metadata.hops` (a JSON number) is still read. The effective depth
-  is `max(delegation.depth, metadata.hops)`; other types are ignored.
+- Legacy (agent hosts, `chat`/`invoke`): `metadata.hops` (a JSON number) is
+  still read. The effective depth is `max(delegation.depth, metadata.hops)`;
+  other types are ignored. Tool runs read the `delegation` field only and
+  ignore `metadata.hops`.
 
 ### 13.2 Receiver limit (A)
 
 An agent refuses a `chat` or `invoke` whose effective depth exceeds its
-limit (default 1) before acking: status **400**, code **4003**, message
+limit (default 1) before authorization and before the turn starts (for
+`chat`, before the ack): status **400**, code **4003**, message
 `delegation depth exceeded (depth=N, max M)`. The status is never 403, so no
 caller reads it as "user lacks access". The turn never starts. Handlers see
 the depth as `Turn.DelegationDepth`.
@@ -758,7 +761,7 @@ An agent declares itself an orchestrator (Go: `Config.Orchestrator`, or env
   `agentclient.ErrDelegationNotAllowed`, before anything is sent.
 - An orchestrator sends `delegation.depth = max(existing, own depth + 1)`; the
   library never lowers a value the caller set. The agent limit is
-  `Config.MaxDelegationDepth` (0 = 1).
+  `Config.MaxDelegationDepth` (≤0 = 1).
 - `card`, `ping`, `discover`, `cancel`, renew and `sessions*` are not turns:
   never checked or stamped.
 

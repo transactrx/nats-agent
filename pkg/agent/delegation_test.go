@@ -12,6 +12,7 @@ func TestConfigDefaults(t *testing.T) {
 		wantOrc bool
 	}{
 		{"zero max defaults to 1", "", false, Config{}, 1, false},
+		{"negative max defaults to 1", "", false, Config{MaxDelegationDepth: -2}, 1, false},
 		{"explicit max kept", "", false, Config{MaxDelegationDepth: 3}, 3, false},
 		{"env true", "true", true, Config{}, 1, true},
 		{"env TRUE with spaces", " TRUE ", true, Config{}, 1, true},
