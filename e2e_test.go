@@ -16,6 +16,7 @@ import (
 
 	"github.com/transactrx/nats-agent/pkg/agent"
 	"github.com/transactrx/nats-agent/pkg/agentclient"
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	"github.com/transactrx/nats-agent/pkg/tool"
 	"github.com/transactrx/nats-agent/pkg/toolclient"
 	"github.com/transactrx/nats-agent/pkg/wire"
@@ -954,5 +955,41 @@ func assertForbidden(t *testing.T, err error, reason string) {
 	}
 	if se.Status != 403 || se.ApiStatusCode != wire.CodeForbidden || se.ErrorMessage != reason {
 		t.Fatalf("want 403/%d/%s, got %d/%d/%s", wire.CodeForbidden, reason, se.Status, se.ApiStatusCode, se.ErrorMessage)
+	}
+}
+
+func TestLeafChatRefusedBeforePublish(t *testing.T) {
+	var calls atomic.Int32
+	a, err := agent.New(agent.Config{
+		Name: "probe", Description: "counts chats", Version: "0.1.0", NATSURL: testURL,
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
+		calls.Add(1)
+		stream.Done(wire.StopEndTurn, nil)
+		return nil
+	})
+	if err := a.Start(); err != nil {
+		t.Fatalf("agent.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+
+	c := agentclient.NewFromConn(testConn(t))
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 0, MayDelegate: false})
+	req := wire.ChatRequest{
+		UserID:  "tester",
+		Message: wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}},
+	}
+	if _, err := c.Chat(ctx, "probe", req); !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+		t.Fatalf("Chat err = %v, want ErrDelegationNotAllowed", err)
+	}
+	if _, err := c.Invoke(ctx, "probe", req); !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+		t.Fatalf("Invoke err = %v, want ErrDelegationNotAllowed", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("probe handled %d chats, want 0", n)
 	}
 }
