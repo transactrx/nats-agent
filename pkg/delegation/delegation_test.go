@@ -3,6 +3,7 @@ package delegation
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -25,6 +26,12 @@ func TestDepth(t *testing.T) {
 		{"hops bool", nil, map[string]any{"hops": true}, 0},
 		{"hops negative", nil, map[string]any{"hops": float64(-1)}, 0},
 		{"hops json.Number", nil, map[string]any{"hops": json.Number("2")}, 2},
+		{"hops huge", nil, map[string]any{"hops": float64(1e30)}, math.MaxInt32},
+		{"hops inf", nil, map[string]any{"hops": math.Inf(1)}, math.MaxInt32},
+		{"hops nan", nil, map[string]any{"hops": math.NaN()}, 0},
+		{"hops json.Number huge", nil, map[string]any{"hops": json.Number("1e30")}, math.MaxInt32},
+		{"hops int64 huge", nil, map[string]any{"hops": int64(math.MaxInt64)}, math.MaxInt32},
+		{"field huge", &wire.Delegation{Depth: math.MaxInt}, nil, math.MaxInt32},
 		{"hops int", nil, map[string]any{"hops": 3}, 3},
 		{"hops int64", nil, map[string]any{"hops": int64(4)}, 4},
 	}

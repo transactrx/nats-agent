@@ -5,6 +5,7 @@ package delegation
 import (
 	"context"
 	"encoding/json"
+	"math"
 
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -28,28 +29,48 @@ func From(ctx context.Context) (Marker, bool) {
 	return m, ok
 }
 
-// Depth returns max(0, d.Depth, metadata["hops"]). Non-numeric hops are
-// ignored.
+// Depth returns max(0, d.Depth, metadata["hops"]), clamped to MaxInt32.
+// Non-numeric hops are ignored; NaN counts as 0.
 func Depth(d *wire.Delegation, metadata map[string]any) int {
 	n := 0
-	if d != nil && d.Depth > n {
-		n = d.Depth
+	if d != nil {
+		n = clamp(int64(d.Depth))
 	}
 	var h int
 	switch v := metadata["hops"].(type) {
 	case float64:
-		h = int(v)
+		h = clampFloat(v)
 	case int:
-		h = v
+		h = clamp(int64(v))
 	case int64:
-		h = int(v)
+		h = clamp(v)
 	case json.Number:
 		if f, err := v.Float64(); err == nil {
-			h = int(f)
+			h = clampFloat(f)
 		}
 	}
 	if h > n {
 		n = h
 	}
 	return n
+}
+
+func clamp(v int64) int {
+	if v < 0 {
+		return 0
+	}
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(v)
+}
+
+func clampFloat(f float64) int {
+	if math.IsNaN(f) || f < 0 {
+		return 0
+	}
+	if f >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(f)
 }
