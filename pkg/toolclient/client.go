@@ -13,6 +13,7 @@ import (
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -139,6 +140,10 @@ func (c *Client) Run(ctx context.Context, name string, req wire.ToolRunRequest, 
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("running tool %s: %w", name, err)
+	}
+	if m, ok := delegation.From(ctx); ok && req.Delegation == nil {
+		// req is a copy; a caller-owned pointer is never mutated.
+		req.Delegation = &wire.Delegation{Depth: m.Depth}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

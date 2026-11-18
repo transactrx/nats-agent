@@ -1195,3 +1195,140 @@ func TestInvokeDepth(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDelegationNotAllowed", err)
 	}
 }
+
+// ─── tool delegation depth ────────────────────────────────────────────────
+
+type hookTool struct {
+	name string
+	fn   func(ctx context.Context, call tool.Call) error
+}
+
+func (h hookTool) Name() string                { return h.name }
+func (h hookTool) Description() string         { return "hook tool. For tests." }
+func (h hookTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
+func (h hookTool) Run(context.Context, map[string]any) (string, error) {
+	return "", errors.New("use RunCall")
+}
+func (h hookTool) RunCall(ctx context.Context, call tool.Call) ([]wire.ToolResultContent, error) {
+	return nil, h.fn(ctx, call)
+}
+
+type plainHookTool struct {
+	name string
+	fn   func(ctx context.Context)
+}
+
+func (p plainHookTool) Name() string                { return p.name }
+func (p plainHookTool) Description() string         { return "plain hook tool. For tests." }
+func (p plainHookTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
+func (p plainHookTool) Run(ctx context.Context, _ map[string]any) (string, error) {
+	p.fn(ctx)
+	return "ok", nil
+}
+
+func hostTool(t *testing.T, tl tool.Tool) *toolclient.Client {
+	t.Helper()
+	h := tool.NewHostWithNATS(testURL, "", "")
+	if err := h.Register(tl, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := h.Start(); err != nil {
+		t.Fatalf("host.Start: %v", err)
+	}
+	t.Cleanup(h.Shutdown)
+	return toolclient.NewFromConn(testConn(t))
+}
+
+func TestToolRunCarriesDepth(t *testing.T) {
+	got := make(chan int, 4)
+	tc := hostTool(t, hookTool{name: "depthtool", fn: func(_ context.Context, call tool.Call) error {
+		got <- call.Delegation
+		return nil
+	}})
+	raw := make(chan []byte, 4)
+	sub, err := testConn(t).Subscribe(wire.ToolSubject("depthtool", "run"), func(m *nats.Msg) { raw <- m.Data })
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 1, MayDelegate: true})
+	if _, err := tc.Run(ctx, "depthtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if v := <-got; v != 1 {
+		t.Fatalf("depth = %d, want 1", v)
+	}
+	if !strings.Contains(string(<-raw), `"delegation":{"depth":1}`) {
+		t.Fatalf("request missing delegation")
+	}
+
+	if _, err := tc.Run(context.Background(), "depthtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if v := <-got; v != 0 {
+		t.Fatalf("depth = %d, want 0", v)
+	}
+	if strings.Contains(string(<-raw), "delegation") {
+		t.Fatalf("plain ctx request must not carry delegation")
+	}
+}
+
+func TestToolCannotCallAgent(t *testing.T) {
+	leaf := startDepthAgent(t, "leafToolB", false, nil)
+	errs := make(chan error, 4)
+	tc := hostTool(t, hookTool{name: "calltool", fn: func(ctx context.Context, _ tool.Call) error {
+		cl := agentclient.NewFromConn(testConn(t))
+		_, err := cl.Chat(ctx, "leafToolB", wire.ChatRequest{Message: depthMsg()})
+		errs <- err
+		return nil
+	}})
+	for _, m := range []delegation.Marker{{Depth: 0, MayDelegate: true}, {Depth: 1, MayDelegate: false}} {
+		ctx := delegation.With(context.Background(), m)
+		if _, err := tc.Run(ctx, "calltool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if err := <-errs; !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+			t.Fatalf("marker %+v: want ErrDelegationNotAllowed, got %v", m, err)
+		}
+	}
+	if n := leaf.calls.Load(); n != 0 {
+		t.Fatalf("leaf got %d calls, want 0", n)
+	}
+}
+
+func TestToolCanReadCard(t *testing.T) {
+	startDepthAgent(t, "leafToolC", false, nil)
+	errs := make(chan error, 1)
+	tc := hostTool(t, hookTool{name: "cardtool", fn: func(ctx context.Context, _ tool.Call) error {
+		_, err := agentclient.NewFromConn(testConn(t)).Card(ctx, "leafToolC")
+		errs <- err
+		return nil
+	}})
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 0, MayDelegate: true})
+	if _, err := tc.Run(ctx, "cardtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("Card from tool: %v", err)
+	}
+}
+
+func TestPlainToolRunGetsMarker(t *testing.T) {
+	type res struct {
+		m  delegation.Marker
+		ok bool
+	}
+	got := make(chan res, 1)
+	tc := hostTool(t, plainHookTool{name: "plaintool", fn: func(ctx context.Context) {
+		m, ok := delegation.From(ctx)
+		got <- res{m, ok}
+	}})
+	if _, err := tc.Run(context.Background(), "plaintool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	r := <-got
+	if !r.ok || r.m != (delegation.Marker{Depth: 0, MayDelegate: false}) {
+		t.Fatalf("got %+v ok=%v", r.m, r.ok)
+	}
+}
