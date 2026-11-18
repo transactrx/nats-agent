@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
 	"github.com/transactrx/nats-agent/pkg/agentclient"
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -44,6 +46,10 @@ type Turn struct {
 	// When Identity.Verified, UserID has been replaced by the verified id.
 	// Identity.IDT keeps the first token; see CurrentIDT for renewed ones.
 	Identity Identity
+
+	// DelegationDepth is the effective agent-to-agent hop depth of this turn
+	// (max of the request's delegation field and legacy metadata.hops).
+	DelegationDepth int
 
 	tok *tokenHolder // current token (Config.Renew); nil = Identity.IDT
 }
@@ -101,6 +107,14 @@ type Config struct {
 	// fresh IDT mid-run. Default false = today's behavior.
 	Renew    bool
 	Metadata map[string]any
+
+	// Orchestrator (opt-in) lets this agent's handlers delegate to other
+	// agents (agentclient Chat/Invoke). Default false = leaf. When false,
+	// env AGENT_ORCHESTRATOR=true turns it on.
+	Orchestrator bool
+	// MaxDelegationDepth is the deepest inbound delegation depth this agent
+	// accepts; deeper requests are refused (400, code 4003). 0 = 1.
+	MaxDelegationDepth int
 
 	// Access registers this agent with the identity model (card "access").
 	// nil → read APP_ID / APP_FUNCTION_ID from the environment.
@@ -217,6 +231,23 @@ func (a *Agent) ackCaps() *wire.AckCaps {
 	return &wire.AckCaps{Progress: a.cfg.Progress}
 }
 
+// applyDelegationDefaults fills MaxDelegationDepth (0 = 1) and the
+// AGENT_ORCHESTRATOR env fallback (only when the field is false).
+func applyDelegationDefaults(cfg *Config) {
+	if cfg.MaxDelegationDepth == 0 {
+		cfg.MaxDelegationDepth = 1
+	}
+	if !cfg.Orchestrator {
+		cfg.Orchestrator = strings.EqualFold(strings.TrimSpace(os.Getenv("AGENT_ORCHESTRATOR")), "true")
+	}
+}
+
+// withMarker stamps the run ctx with this agent's delegation marker so the
+// agentclient can refuse (leaf) or stamp depth+1 (orchestrator).
+func (a *Agent) withMarker(ctx context.Context, turn *Turn) context.Context {
+	return delegation.With(ctx, delegation.Marker{Depth: turn.DelegationDepth, MayDelegate: a.cfg.Orchestrator})
+}
+
 // New creates an agent. The NATS connection is established immediately
 // (fail-fast); endpoints are registered on Start.
 func New(cfg Config) (*Agent, error) {
@@ -238,6 +269,7 @@ func New(cfg Config) (*Agent, error) {
 	if len(cfg.OutputModalities) == 0 {
 		cfg.OutputModalities = []string{"text"}
 	}
+	applyDelegationDefaults(&cfg)
 	if cfg.Access == nil {
 		cfg.Access = accessFromEnv()
 	}
@@ -648,6 +680,13 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	}
 	// Display-only context: bad values are dropped, never fatal.
 	req.Context = req.Context.Normalize()
+	depth := delegation.Depth(req.Delegation, req.Metadata)
+	if depth > a.cfg.MaxDelegationDepth {
+		e := nats_service.NewValidationError(
+			fmt.Sprintf("delegation depth exceeded (depth=%d, max %d)", depth, a.cfg.MaxDelegationDepth),
+			wire.CodeDelegationDepth, nil)
+		return nil, &e
+	}
 	id, aerr := a.Authorize(msg, req.SessionID)
 	if aerr != nil {
 		return nil, aerr
@@ -656,11 +695,12 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		req.UserID = id.UserID
 	}
 	return &Turn{
-		ChatRequest: req,
-		RunID:       "run_" + uuid.New().String(),
-		Logger:      msg.Logger,
-		Identity:    id,
-		tok:         &tokenHolder{current: id.IDT, userID: id.UserID, accountID: id.AccountID},
+		ChatRequest:     req,
+		RunID:           "run_" + uuid.New().String(),
+		Logger:          msg.Logger,
+		Identity:        id,
+		DelegationDepth: depth,
+		tok:             &tokenHolder{current: id.IDT, userID: id.UserID, accountID: id.AccountID},
 	}, nil
 }
 
@@ -706,6 +746,7 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 	msg.ResponseBody = data
 
 	ctx, cancel := runContext(turn)
+	ctx = a.withMarker(ctx, turn)
 	r := &run{cancel: cancel}
 	a.mu.Lock()
 	a.runs[turn.RunID] = r
@@ -768,6 +809,7 @@ func (a *Agent) handleInvoke(msg *nats_service.NatsMessage) *nats_service.NatsSe
 	}
 
 	ctx, cancel := context.WithCancelCause(agentclient.WithUserContext(context.Background(), turn.Context))
+	ctx = a.withMarker(ctx, turn)
 	defer cancel(nil)
 	a.mu.Lock()
 	a.runs[turn.RunID] = &run{cancel: cancel}

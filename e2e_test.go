@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -991,5 +992,206 @@ func TestLeafChatRefusedBeforePublish(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("probe handled %d chats, want 0", n)
+	}
+}
+
+// ─── delegation depth ─────────────────────────────────────────────────────
+
+type depthProbe struct {
+	calls  atomic.Int32
+	depths chan int
+}
+
+// startDepthAgent starts an agent that records each turn's DelegationDepth
+// and ends the turn. onTurn (optional) runs first with the handler ctx.
+func startDepthAgent(t *testing.T, name string, orchestrator bool, onTurn func(ctx context.Context, turn *agent.Turn)) *depthProbe {
+	t.Helper()
+	p := &depthProbe{depths: make(chan int, 8)}
+	a, err := agent.New(agent.Config{
+		Name: name, Description: "depth probe", Version: "0.1.0", NATSURL: testURL,
+		Orchestrator: orchestrator,
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	a.OnChat(func(ctx context.Context, turn *agent.Turn, stream *agent.Stream) error {
+		p.calls.Add(1)
+		p.depths <- turn.DelegationDepth
+		if onTurn != nil {
+			onTurn(ctx, turn)
+		}
+		stream.Done(wire.StopEndTurn, nil)
+		return nil
+	})
+	a.OnInvoke(func(ctx context.Context, turn *agent.Turn) (*wire.InvokeResponse, error) {
+		p.calls.Add(1)
+		p.depths <- turn.DelegationDepth
+		if onTurn != nil {
+			onTurn(ctx, turn)
+		}
+		return &wire.InvokeResponse{}, nil
+	})
+	if err := a.Start(); err != nil {
+		t.Fatalf("agent.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+	return p
+}
+
+func depthMsg() wire.Message {
+	return wire.Message{Role: "user", Content: []wire.ContentBlock{{Text: "hi"}}}
+}
+
+func assertDepthRefused(t *testing.T, err error, wantDepth int) {
+	t.Helper()
+	var se *agentclient.ServiceError
+	if !errors.As(err, &se) {
+		t.Fatalf("want ServiceError, got %v", err)
+	}
+	want := fmt.Sprintf("depth=%d, max 1", wantDepth)
+	if se.Status != 400 || se.ApiStatusCode != wire.CodeDelegationDepth || !strings.Contains(se.ErrorMessage, want) {
+		t.Fatalf("want 400/%d/...%s, got %d/%d/%s", wire.CodeDelegationDepth, want, se.Status, se.ApiStatusCode, se.ErrorMessage)
+	}
+}
+
+func drain(run *agentclient.Run) {
+	for range run.Events {
+	}
+}
+
+func TestDepthRefusedAtReceiver(t *testing.T) {
+	p := startDepthAgent(t, "leafA", false, nil)
+	c := agentclient.NewFromConn(testConn(t))
+	_, err := c.Chat(context.Background(), "leafA", wire.ChatRequest{
+		Message: depthMsg(), Delegation: &wire.Delegation{Depth: 2},
+	})
+	assertDepthRefused(t, err, 2)
+	if p.calls.Load() != 0 {
+		t.Fatal("handler must not run")
+	}
+}
+
+func TestLegacyHopsRefused(t *testing.T) {
+	p := startDepthAgent(t, "leafHops", false, nil)
+	c := agentclient.NewFromConn(testConn(t))
+	_, err := c.Chat(context.Background(), "leafHops", wire.ChatRequest{
+		Message: depthMsg(), Metadata: map[string]any{"hops": 2},
+	})
+	assertDepthRefused(t, err, 2)
+	if p.calls.Load() != 0 {
+		t.Fatal("handler must not run")
+	}
+}
+
+func TestDepthOneAccepted(t *testing.T) {
+	p := startDepthAgent(t, "leafOne", false, nil)
+	c := agentclient.NewFromConn(testConn(t))
+	run, err := c.Chat(context.Background(), "leafOne", wire.ChatRequest{
+		Message: depthMsg(), Delegation: &wire.Delegation{Depth: 1},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	drain(run)
+	if got := <-p.depths; got != 1 {
+		t.Fatalf("depth = %d, want 1", got)
+	}
+}
+
+func TestNoFieldAccepted(t *testing.T) {
+	p := startDepthAgent(t, "leafNone", false, nil)
+	c := agentclient.NewFromConn(testConn(t))
+	run, err := c.Chat(context.Background(), "leafNone", wire.ChatRequest{Message: depthMsg()})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	drain(run)
+	if got := <-p.depths; got != 0 {
+		t.Fatalf("depth = %d, want 0", got)
+	}
+}
+
+func TestOrchestratorToLeaf(t *testing.T) {
+	leaf := startDepthAgent(t, "leafB", false, nil)
+	var chatErr atomic.Value
+	orch := startDepthAgent(t, "orch", true, func(ctx context.Context, turn *agent.Turn) {
+		cl := agentclient.NewFromConn(testConn(t))
+		run, err := cl.Chat(ctx, "leafB", wire.ChatRequest{Message: depthMsg()})
+		if err != nil {
+			chatErr.Store(err)
+			return
+		}
+		drain(run)
+	})
+	c := agentclient.NewFromConn(testConn(t))
+	run, err := c.Chat(context.Background(), "orch", wire.ChatRequest{Message: depthMsg()})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var last wire.AgentEvent
+	for ev := range run.Events {
+		last = ev
+	}
+	if last.Type != wire.EventDone {
+		t.Fatalf("orch turn ended %q, want done", last.Type)
+	}
+	if v := chatErr.Load(); v != nil {
+		t.Fatalf("orch->leaf failed: %v", v)
+	}
+	if got := <-orch.depths; got != 0 {
+		t.Fatalf("orch depth = %d, want 0", got)
+	}
+	if got := <-leaf.depths; got != 1 {
+		t.Fatalf("leaf depth = %d, want 1", got)
+	}
+}
+
+func TestLeafToLeafRefused(t *testing.T) {
+	leaf := startDepthAgent(t, "leafD", false, nil)
+	var chatErr atomic.Value
+	startDepthAgent(t, "leafC", false, func(ctx context.Context, turn *agent.Turn) {
+		cl := agentclient.NewFromConn(testConn(t))
+		_, err := cl.Chat(ctx, "leafD", wire.ChatRequest{Message: depthMsg()})
+		chatErr.Store(err)
+	})
+	c := agentclient.NewFromConn(testConn(t))
+	run, err := c.Chat(context.Background(), "leafC", wire.ChatRequest{Message: depthMsg()})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	drain(run)
+	err, _ = chatErr.Load().(error)
+	if !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+		t.Fatalf("err = %v, want ErrDelegationNotAllowed", err)
+	}
+	if leaf.calls.Load() != 0 {
+		t.Fatal("leafD must not be called")
+	}
+}
+
+func TestInvokeDepth(t *testing.T) {
+	leaf := startDepthAgent(t, "leafE", false, nil)
+	var chatErr atomic.Value
+	startDepthAgent(t, "leafF", false, func(ctx context.Context, turn *agent.Turn) {
+		cl := agentclient.NewFromConn(testConn(t))
+		_, err := cl.Chat(ctx, "leafE", wire.ChatRequest{Message: depthMsg()})
+		chatErr.Store(err)
+	})
+	c := agentclient.NewFromConn(testConn(t))
+
+	_, err := c.Invoke(context.Background(), "leafE", wire.ChatRequest{
+		Message: depthMsg(), Delegation: &wire.Delegation{Depth: 2},
+	})
+	assertDepthRefused(t, err, 2)
+	if leaf.calls.Load() != 0 {
+		t.Fatal("invoke handler must not run")
+	}
+
+	if _, err := c.Invoke(context.Background(), "leafF", wire.ChatRequest{Message: depthMsg()}); err != nil {
+		t.Fatalf("Invoke leafF: %v", err)
+	}
+	err, _ = chatErr.Load().(error)
+	if !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+		t.Fatalf("err = %v, want ErrDelegationNotAllowed", err)
 	}
 }
