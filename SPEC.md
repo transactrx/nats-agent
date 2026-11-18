@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.5 (draft)
+# NATS Agent Protocol — Specification v1.6 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -203,7 +203,8 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
   },
   "streamSubject": "_INBOX.abc123",
   "metadata": { "isAdmin": true },
-  "context": { "timeZone": "America/New_York", "userName": "Jane Doe", "locale": "en-US" }
+  "context": { "timeZone": "America/New_York", "userName": "Jane Doe", "locale": "en-US" },
+  "delegation": { "depth": 1 }
 }
 ```
 
@@ -230,6 +231,10 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
   - Standard prompt sentence (Go: `turn.ContextLine()`): "The user asking is
     Jane Doe (time zone America/New_York). Their current local time is
     Monday, October 19, 2026 9:30 PM EDT; UTC is 2026-10-20 01:30 UTC."
+
+- `delegation` optional (v1.6): `{depth}`, how many agent-to-agent hops
+  precede this turn. Absent = 0 (an entry call). An agent refuses a turn
+  deeper than its limit with 400 / code 4003. See §13.
 
 **Authentication (v1.1):** requests to `chat`, `invoke`, `sessions*` carry the
 caller's Internal Delegation Token in NATS header `X-TRX-IDT`. An agent with
@@ -401,7 +406,8 @@ Request:
   "userId": "manuel.elaraj",
   "sessionId": "6f9c2c1e-...",
   "agent": "copayAssistant",
-  "metadata": {}
+  "metadata": {},
+  "delegation": { "depth": 1 }
 }
 ```
 
@@ -440,6 +446,9 @@ Reply:
   Until downscoped delegation exists (IDENTITY-AND-AUTHORITY.md §4) the token
   forwarded is the caller's own; tools must not pass it to anything outside
   their own trust boundary.
+- `delegation` (optional, v1.6): `{depth}`, the delegation depth of the turn
+  that issued the call. A tool run is not a hop, so the depth is forwarded
+  unchanged. Tools never call agents (§13.4).
 - A tool at capacity replies 429 / code 4291 without executing.
 - Execution is synchronous request/reply in v1; long-running tools with
   progress streaming are a candidate for a MINOR revision.
@@ -464,6 +473,7 @@ Same envelope as every transactrx service (`nats-service`
 |---|---|
 | 4001 | Invalid body (JSON unmarshal failed) |
 | 4002 | Missing required field |
+| 4003 | Delegation depth exceeded (400, never 403; §13) |
 | 4031 | Forbidden — IDT missing, invalid, or function not granted (message = reason: MISSING_IDT, DENIED_FN, TOKEN_REVOKED, SESSION_EXPIRED, TOKEN_NOT_FOUND, VALIDATE_ERROR, INVALID_IDENTITY, INVALID_IDT) |
 | 4041 | Unknown session |
 | 4042 | Unknown run (cancel) |
@@ -711,3 +721,73 @@ when the current token has 8 min left, and retries with backoff (5 s, 10 s,
   opt-in.
 - The Go client gates its no-progress cut on the ack's `caps.progress`
   (§12.1): runs on agents without it behave exactly as plain `Chat`.
+
+## 13. Delegation depth (v1.6)
+
+Only an orchestrator may delegate a turn to another agent. Every other agent
+is a leaf: if an orchestrator asks Agent1, Agent1 must not ask Agent2.
+
+### 13.1 Field
+
+`ChatRequest.delegation` and `ToolRunRequest.delegation` (optional):
+
+```json
+{ "delegation": { "depth": 1 } }
+```
+
+- `depth` is the number of agent-to-agent hops already taken to reach this
+  turn. Absent or null = 0 (an entry call: UI, BFF, scheduler, worker).
+  Negative = 0.
+- Legacy: `metadata.hops` (a JSON number) is still read. The effective depth
+  is `max(delegation.depth, metadata.hops)`; other types are ignored.
+
+### 13.2 Receiver limit (A)
+
+An agent refuses a `chat` or `invoke` whose effective depth exceeds its
+limit (default 1) before acking: status **400**, code **4003**, message
+`delegation depth exceeded (depth=N, max M)`. The status is never 403, so no
+caller reads it as "user lacks access". The turn never starts. Handlers see
+the depth as `Turn.DelegationDepth`.
+
+### 13.3 Orchestrator rule (B)
+
+An agent declares itself an orchestrator (Go: `Config.Orchestrator`, or env
+`AGENT_ORCHESTRATOR=true`); the default is leaf. From inside a turn:
+
+- A leaf that starts an agent call (`chat`, `invoke`) fails locally with
+  `agentclient.ErrDelegationNotAllowed`, before anything is sent.
+- An orchestrator sends `delegation.depth = max(existing, own depth + 1)`; the
+  library never lowers a value the caller set. The agent limit is
+  `Config.MaxDelegationDepth` (0 = 1).
+- `card`, `ping`, `discover`, `cancel`, renew and `sessions*` are not turns:
+  never checked or stamped.
+
+### 13.4 Tools
+
+Tools never call agents. A tool host runs each tool as a leaf, so a
+`chat`/`invoke` made with the tool's context fails with
+`ErrDelegationNotAllowed`, whatever the caller's depth. The caller's depth
+(`delegation.depth` on `run`, unchanged) is exposed to the tool
+(`tool.Call.Delegation`) for logs; tool hosts do not refuse on depth.
+`card` and `ping` stay allowed.
+
+### 13.5 Entries
+
+Calls made with no turn context (BFF, dock gateway, scheduler executor,
+worker, tests) carry no marker: the request is sent unchanged and the
+receiver reads depth 0. A scheduled run is an entry.
+
+### 13.6 Compatibility
+
+| Caller → Receiver | Result |
+|---|---|
+| old/entry caller → new agent | no field → depth 0 → accepted |
+| old RSAssistant (`hops:1`) → new agent | depth 1 → accepted |
+| new orchestrator → old agent | field ignored → as today |
+| new leaf agent with code that calls an agent | **fails** `ErrDelegationNotAllowed` |
+| scheduler executor (any version) → any agent | depth 0 → accepted |
+| tool (new host) whose run code calls an agent | **fails** `ErrDelegationNotAllowed` |
+
+An agent that upgrades and delegates must set `Orchestrator: true`.
+Enforcement is caller-asserted: a caller that forges depth 0 on raw NATS is
+out of scope (NATS publish permissions or a signed depth are later work).
