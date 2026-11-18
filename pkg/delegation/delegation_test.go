@@ -30,6 +30,8 @@ func TestDepth(t *testing.T) {
 		{"hops inf", nil, map[string]any{"hops": math.Inf(1)}, math.MaxInt32},
 		{"hops nan", nil, map[string]any{"hops": math.NaN()}, 0},
 		{"hops json.Number huge", nil, map[string]any{"hops": json.Number("1e30")}, math.MaxInt32},
+		{"hops json.Number range", nil, map[string]any{"hops": json.Number("1e400")}, math.MaxInt32},
+		{"hops json.Number syntax", nil, map[string]any{"hops": json.Number("abc")}, 0},
 		{"hops int64 huge", nil, map[string]any{"hops": int64(math.MaxInt64)}, math.MaxInt32},
 		{"field huge", &wire.Delegation{Depth: math.MaxInt}, nil, math.MaxInt32},
 		{"hops int", nil, map[string]any{"hops": 3}, 3},

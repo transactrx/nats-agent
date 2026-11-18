@@ -45,9 +45,9 @@ func Depth(d *wire.Delegation, metadata map[string]any) int {
 	case int64:
 		h = clamp(v)
 	case json.Number:
-		if f, err := v.Float64(); err == nil {
-			h = clampFloat(f)
-		}
+		// On ErrRange Float64 still returns +-Inf; use it. Syntax errors give 0.
+		f, _ := v.Float64()
+		h = clampFloat(f)
 	}
 	if h > n {
 		n = h
