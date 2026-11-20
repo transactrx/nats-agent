@@ -42,6 +42,20 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
+// recv waits up to 5 s for a value, so a missed message fails the test
+// instead of hanging the whole run until the package timeout.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for a value")
+		var zero T
+		return zero
+	}
+}
+
 func testConn(t *testing.T) *nats.Conn {
 	t.Helper()
 	nc, err := nats.Connect(testURL)
@@ -1093,7 +1107,7 @@ func TestDepthOneAccepted(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 	drain(run)
-	if got := <-p.depths; got != 1 {
+	if got := recv(t, p.depths); got != 1 {
 		t.Fatalf("depth = %d, want 1", got)
 	}
 }
@@ -1106,7 +1120,7 @@ func TestNoFieldAccepted(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 	drain(run)
-	if got := <-p.depths; got != 0 {
+	if got := recv(t, p.depths); got != 0 {
 		t.Fatalf("depth = %d, want 0", got)
 	}
 }
@@ -1138,10 +1152,10 @@ func TestOrchestratorToLeaf(t *testing.T) {
 	if v := chatErr.Load(); v != nil {
 		t.Fatalf("orch->leaf failed: %v", v)
 	}
-	if got := <-orch.depths; got != 0 {
+	if got := recv(t, orch.depths); got != 0 {
 		t.Fatalf("orch depth = %d, want 0", got)
 	}
-	if got := <-leaf.depths; got != 1 {
+	if got := recv(t, leaf.depths); got != 1 {
 		t.Fatalf("leaf depth = %d, want 1", got)
 	}
 }
@@ -1246,30 +1260,36 @@ func TestToolRunCarriesDepth(t *testing.T) {
 		return nil
 	}})
 	raw := make(chan []byte, 4)
-	sub, err := testConn(t).Subscribe(wire.ToolSubject("depthtool", "run"), func(m *nats.Msg) { raw <- m.Data })
+	rawConn := testConn(t)
+	sub, err := rawConn.Subscribe(wire.ToolSubject("depthtool", "run"), func(m *nats.Msg) { raw <- m.Data })
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	// The subscription must reach the server before Run publishes, or the
+	// copy of the request is never delivered (seen on slower CI runners).
+	if err := rawConn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 1, MayDelegate: true})
 	if _, err := tc.Run(ctx, "depthtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if v := <-got; v != 1 {
+	if v := recv(t, got); v != 1 {
 		t.Fatalf("depth = %d, want 1", v)
 	}
-	if !strings.Contains(string(<-raw), `"delegation":{"depth":1}`) {
+	if !strings.Contains(string(recv(t, raw)), `"delegation":{"depth":1}`) {
 		t.Fatalf("request missing delegation")
 	}
 
 	if _, err := tc.Run(context.Background(), "depthtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if v := <-got; v != 0 {
+	if v := recv(t, got); v != 0 {
 		t.Fatalf("depth = %d, want 0", v)
 	}
-	if strings.Contains(string(<-raw), "delegation") {
+	if strings.Contains(string(recv(t, raw)), "delegation") {
 		t.Fatalf("plain ctx request must not carry delegation")
 	}
 }
@@ -1284,7 +1304,7 @@ func TestToolHostIgnoresHops(t *testing.T) {
 	if _, err := tc.Run(context.Background(), "hopstool", req, 0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if v := <-got; v != 0 {
+	if v := recv(t, got); v != 0 {
 		t.Fatalf("depth = %d, want 0 (tool runs ignore metadata.hops)", v)
 	}
 }
@@ -1303,7 +1323,7 @@ func TestToolCannotCallAgent(t *testing.T) {
 		if _, err := tc.Run(ctx, "calltool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if err := <-errs; !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
+		if err := recv(t, errs); !errors.Is(err, agentclient.ErrDelegationNotAllowed) {
 			t.Fatalf("marker %+v: want ErrDelegationNotAllowed, got %v", m, err)
 		}
 	}
@@ -1324,7 +1344,7 @@ func TestToolCanReadCard(t *testing.T) {
 	if _, err := tc.Run(ctx, "cardtool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if err := <-errs; err != nil {
+	if err := recv(t, errs); err != nil {
 		t.Fatalf("Card from tool: %v", err)
 	}
 }
@@ -1342,7 +1362,7 @@ func TestPlainToolRunGetsMarker(t *testing.T) {
 	if _, err := tc.Run(context.Background(), "plaintool", wire.ToolRunRequest{Input: map[string]any{}}, 0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	r := <-got
+	r := recv(t, got)
 	if !r.ok || r.m != (delegation.Marker{Depth: 0, MayDelegate: false}) {
 		t.Fatalf("got %+v ok=%v", r.m, r.ok)
 	}
