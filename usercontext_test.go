@@ -15,7 +15,7 @@ import (
 // (no explicit forwarding).
 func startContextAgent(t *testing.T, name, next string) {
 	t.Helper()
-	a, err := agent.New(agent.Config{Name: name, Description: "user context test agent", UserContext: true, NATSURL: testURL})
+	a, err := agent.New(agent.Config{Name: name, Description: "user context test agent", UserContext: true, Orchestrator: next != "", NATSURL: testURL})
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestUserContextEndToEnd(t *testing.T) {
 	}
 
 	card, err := c.Card(context.Background(), "ctxBack")
-	if err != nil || !card.Capabilities.UserContext || card.ProtocolVersion != "1.5" {
+	if err != nil || !card.Capabilities.UserContext || card.ProtocolVersion != "1.6" {
 		t.Fatalf("card: %+v %v", card, err)
 	}
 

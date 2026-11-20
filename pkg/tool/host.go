@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	"github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/wire"
 )
@@ -42,6 +43,10 @@ type Call struct {
 	// Identity is the host's verdict on the caller. When Identity.Verified,
 	// UserID came from the token; otherwise it is the caller's assertion.
 	Identity idt.Identity
+	// Delegation is the caller's delegation depth (0 when the request
+	// carried none). A tool run is not a hop, so it is not incremented.
+	// Tools never delegate: the run context marks MayDelegate=false.
+	Delegation int
 }
 
 // CallTool is an optional extension of Tool. A tool implementing it
@@ -384,18 +389,21 @@ func (ht *hostedTool) handleRun(msg *nats_service.NatsMessage) *nats_service.Nat
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ht.card.TimeoutSeconds)*time.Second)
 	defer cancel()
 	ctx = idt.WithToken(ctx, id.IDT)
+	depth := delegation.Depth(req.Delegation, nil) // tools ignore legacy hops
+	ctx = delegation.With(ctx, delegation.Marker{Depth: depth, MayDelegate: false})
 
 	start := time.Now()
 	var content []wire.ToolResultContent
 	var err error
 	if ct, ok := ht.tool.(CallTool); ok {
 		content, err = ct.RunCall(ctx, Call{
-			ToolUseID: req.ToolUseID,
-			SessionID: req.SessionID,
-			Agent:     req.Agent,
-			Input:     req.Input,
-			Metadata:  req.Metadata,
-			Identity:  id,
+			ToolUseID:  req.ToolUseID,
+			SessionID:  req.SessionID,
+			Agent:      req.Agent,
+			Input:      req.Input,
+			Metadata:   req.Metadata,
+			Identity:   id,
+			Delegation: depth,
 		})
 	} else {
 		var result string

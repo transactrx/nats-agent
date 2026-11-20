@@ -111,6 +111,16 @@ done/cancelled.
 - Cut reasons on cancel: `progress_idle`, `token_rotation_failed`,
   `interrupted`, `time_cap`, `unavailable` (a required service was down).
 
+### Delegation depth (protocol 1.6)
+
+Only orchestrators call other agents. Set `Config.Orchestrator: true` (or env
+`AGENT_ORCHESTRATOR=true`) to let a turn use `agentclient` `Chat`/`Invoke`;
+the default is leaf, and a leaf's call fails with
+`agentclient.ErrDelegationNotAllowed` before anything is sent. The depth rides
+along automatically; an agent refuses a turn deeper than
+`Config.MaxDelegationDepth` (default 1) with 400 / code 4003. Tools never
+call agents. See SPEC.md §13.
+
 ### User context (protocol 1.3)
 
 Requests may carry `context` `{timeZone, userName, locale}` — display only,

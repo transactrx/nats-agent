@@ -16,6 +16,7 @@ import (
 	nats_service_common "github.com/transactrx/nats-service/pkg/nats-service-common"
 
 	"github.com/transactrx/nats-agent/internal/progressclock"
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	"github.com/transactrx/nats-agent/pkg/progress"
 	"github.com/transactrx/nats-agent/pkg/toolclient"
 	"github.com/transactrx/nats-agent/pkg/wire"
@@ -985,5 +986,79 @@ func TestRenewSkipsStrayReplyBeforeAnswer(t *testing.T) {
 	err := Renew(context.Background(), testConn(t), subject, wire.RenewRequest{RunID: "r", IDT: "tok"})
 	if !errors.Is(err, ErrRenewRejected) || !strings.Contains(err.Error(), "identity_mismatch") {
 		t.Fatalf("Renew = %v, want ErrRenewRejected identity_mismatch", err)
+	}
+}
+
+func TestApplyDelegationNoMarker(t *testing.T) {
+	req := wire.ChatRequest{}
+	if err := applyDelegation(context.Background(), &req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if req.Delegation != nil {
+		t.Fatalf("delegation = %+v, want nil", req.Delegation)
+	}
+}
+
+func TestApplyDelegationLeaf(t *testing.T) {
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 0, MayDelegate: false})
+	req := wire.ChatRequest{}
+	err := applyDelegation(ctx, &req)
+	if !errors.Is(err, ErrDelegationNotAllowed) {
+		t.Fatalf("err = %v, want ErrDelegationNotAllowed", err)
+	}
+	if req.Delegation != nil {
+		t.Fatalf("delegation = %+v, want nil", req.Delegation)
+	}
+}
+
+func TestApplyDelegationOrchestrator(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{{0, 1}, {1, 2}} {
+		ctx := delegation.With(context.Background(), delegation.Marker{Depth: tc.in, MayDelegate: true})
+		req := wire.ChatRequest{}
+		if err := applyDelegation(ctx, &req); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if req.Delegation == nil || req.Delegation.Depth != tc.want {
+			t.Fatalf("in %d: delegation = %+v, want depth %d", tc.in, req.Delegation, tc.want)
+		}
+	}
+}
+
+func TestApplyDelegationNeverLowers(t *testing.T) {
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 0, MayDelegate: true})
+	orig := &wire.Delegation{Depth: 5}
+	req := wire.ChatRequest{Delegation: orig}
+	if err := applyDelegation(ctx, &req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if req.Delegation.Depth != 5 {
+		t.Fatalf("depth = %d, want 5", req.Delegation.Depth)
+	}
+	if orig.Depth != 5 {
+		t.Fatalf("caller pointer mutated: %d", orig.Depth)
+	}
+}
+
+func TestApplyDelegationDoesNotMutateCallerPointer(t *testing.T) {
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 2, MayDelegate: true})
+	orig := &wire.Delegation{Depth: 1}
+	req := wire.ChatRequest{Delegation: orig}
+	if err := applyDelegation(ctx, &req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if req.Delegation.Depth != 3 || orig.Depth != 1 {
+		t.Fatalf("got %d, caller %d; want 3, 1", req.Delegation.Depth, orig.Depth)
+	}
+}
+
+func TestApplyDelegationDerivedCtx(t *testing.T) {
+	ctx := delegation.With(context.Background(), delegation.Marker{Depth: 0, MayDelegate: true})
+	ctx = WithIDTSource(context.WithoutCancel(ctx), func() string { return "x" })
+	req := wire.ChatRequest{}
+	if err := applyDelegation(ctx, &req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if req.Delegation == nil || req.Delegation.Depth != 1 {
+		t.Fatalf("delegation = %+v, want depth 1", req.Delegation)
 	}
 }
