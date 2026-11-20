@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.5"
+const ProtocolVersion = "1.6"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -170,6 +170,14 @@ type ChatRequest struct {
 	// Budget (v1.5) is the time the caller still allows this turn. Absent =
 	// the agent's own limits apply.
 	Budget *Budget `json:"budget,omitempty"`
+	// Delegation (v1.6) is how many agent-to-agent hops precede this turn.
+	// Absent = 0 (a top-level turn).
+	Delegation *Delegation `json:"delegation,omitempty"`
+}
+
+// Delegation (v1.6) carries the agent-to-agent hop depth of a request.
+type Delegation struct {
+	Depth int `json:"depth"`
 }
 
 // Budget (v1.5) carries the caller's remaining time for a turn.
@@ -418,6 +426,8 @@ type ToolRunRequest struct {
 	SessionID string         `json:"sessionId,omitempty"`
 	Agent     string         `json:"agent,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
+	// Delegation (v1.6) is the hop depth of the turn that issued this call.
+	Delegation *Delegation `json:"delegation,omitempty"`
 }
 
 // Tool run statuses. Execution errors are model-visible data ("error"
@@ -438,14 +448,15 @@ type ToolRunResponse struct {
 // ─── Error detail codes (§9) ──────────────────────────────────────────────
 
 const (
-	CodeInvalidBody    = 4001
-	CodeMissingField   = 4002
-	CodeForbidden      = 4031
-	CodeUnknownSession = 4041
-	CodeUnknownRun     = 4042
-	CodeBusy           = 4291
-	CodeUpstream       = 5001
-	CodeInternal       = 5002
+	CodeInvalidBody     = 4001
+	CodeMissingField    = 4002
+	CodeDelegationDepth = 4003
+	CodeForbidden       = 4031
+	CodeUnknownSession  = 4041
+	CodeUnknownRun      = 4042
+	CodeBusy            = 4291
+	CodeUpstream        = 5001
+	CodeInternal        = 5002
 )
 
 // MatchesFilter reports whether an agent card matches a discovery filter.

@@ -16,6 +16,7 @@ import (
 	nats_service "github.com/transactrx/nats-service/pkg/nats-service"
 	nats_service_client "github.com/transactrx/nats-service/pkg/nats-service-client"
 
+	"github.com/transactrx/nats-agent/pkg/delegation"
 	idtpkg "github.com/transactrx/nats-agent/pkg/idt"
 	"github.com/transactrx/nats-agent/pkg/progress"
 	"github.com/transactrx/nats-agent/pkg/wire"
@@ -49,6 +50,10 @@ var (
 	// outcome is unknown (on a timeout the agent may have applied the token
 	// and the reply was lost); retrying with the same token is safe.
 	ErrRenewTransport = errors.New("agentclient: renew transport error")
+	// ErrDelegationNotAllowed: the calling turn's agent is not an
+	// orchestrator, so it may not call other agents. Returned before
+	// anything is published.
+	ErrDelegationNotAllowed = errors.New("agentclient: this agent may not call other agents (not an orchestrator)")
 )
 
 // ServiceError is a protocol-level error reply from an agent (§9 envelope).
@@ -212,6 +217,32 @@ func withContextFrom(ctx context.Context, req *wire.ChatRequest) {
 			req.Context = &cp
 		}
 	}
+}
+
+// applyDelegation enforces the outbound delegation rule for a call made from
+// inside a turn (ctx carries a delegation marker). No marker: no-op. A turn
+// that may not delegate is refused. Otherwise req.Delegation.Depth becomes
+// max(existing, marker.Depth+1) on a copy, never mutating the caller's
+// pointer.
+func applyDelegation(ctx context.Context, req *wire.ChatRequest) error {
+	m, ok := delegation.From(ctx)
+	if !ok {
+		return nil
+	}
+	if !m.MayDelegate {
+		return ErrDelegationNotAllowed
+	}
+	depth := m.Depth + 1
+	if req.Delegation != nil && req.Delegation.Depth > depth {
+		depth = req.Delegation.Depth
+	}
+	d := wire.Delegation{}
+	if req.Delegation != nil {
+		d = *req.Delegation
+	}
+	d.Depth = depth
+	req.Delegation = &d
+	return nil
 }
 
 // requestJSON does one documented request/reply against an agent endpoint.
@@ -460,6 +491,9 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 	if len(req.Message.Content) == 0 {
 		return nil, fmt.Errorf("chat request needs a message with content")
 	}
+	if err := applyDelegation(ctx, &req); err != nil {
+		return nil, err
+	}
 	if req.StreamSubject == "" {
 		req.StreamSubject = nats.NewInbox()
 	}
@@ -688,6 +722,9 @@ func (c *Client) CancelWithReason(ctx context.Context, agent, runID, reason stri
 
 // Invoke runs a synchronous turn (capability "sync").
 func (c *Client) Invoke(ctx context.Context, agent string, req wire.ChatRequest) (*wire.InvokeResponse, error) {
+	if err := applyDelegation(ctx, &req); err != nil {
+		return nil, err
+	}
 	req.StreamSubject = ""
 	withContextFrom(ctx, &req)
 	return requestJSON[wire.InvokeResponse](ctx, c, wire.AgentSubject(agent, "invoke"), req)
