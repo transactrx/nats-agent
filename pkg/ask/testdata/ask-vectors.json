@@ -1,0 +1,2851 @@
+[
+ {
+  "name": "required missing",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "reason",
+     "label": "Reason",
+     "type": "text",
+     "required": true
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "reason": "Reason is required"
+  }
+ },
+ {
+  "name": "required empty string",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "reason",
+     "label": "Reason",
+     "type": "text",
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "reason": ""
+  },
+  "errors": {
+   "reason": "Reason is required"
+  }
+ },
+ {
+  "name": "optional missing ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "reason",
+     "label": "Reason",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "label falls back to name",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "reason",
+     "type": "text",
+     "required": true
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "reason": "reason is required"
+  }
+ },
+ {
+  "name": "text wrong type",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "reason",
+     "label": "Reason",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "reason": 5
+  },
+  "errors": {
+   "reason": "Reason must be text"
+  }
+ },
+ {
+  "name": "pattern ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "code",
+     "label": "Code",
+     "type": "text",
+     "pattern": "^[A-Z]{3}$"
+    }
+   ]
+  },
+  "values": {
+   "code": "ABC"
+  },
+  "errors": {}
+ },
+ {
+  "name": "pattern fail default message",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "code",
+     "label": "Code",
+     "type": "text",
+     "pattern": "^[A-Z]{3}$"
+    }
+   ]
+  },
+  "values": {
+   "code": "abc"
+  },
+  "errors": {
+   "code": "Code has an invalid format"
+  }
+ },
+ {
+  "name": "pattern fail custom message",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "code",
+     "label": "Code",
+     "type": "text",
+     "pattern": "^[A-Z]{3}$",
+     "patternMessage": "Three capital letters"
+    }
+   ]
+  },
+  "values": {
+   "code": "abc"
+  },
+  "errors": {
+   "code": "Three capital letters"
+  }
+ },
+ {
+  "name": "minLength fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "name2",
+     "label": "Name2",
+     "type": "text",
+     "minLength": 3
+    }
+   ]
+  },
+  "values": {
+   "name2": "ab"
+  },
+  "errors": {
+   "name2": "Name2 must be at least 3 characters"
+  }
+ },
+ {
+  "name": "minLength counts runes",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "name2",
+     "label": "Name2",
+     "type": "text",
+     "minLength": 3
+    }
+   ]
+  },
+  "values": {
+   "name2": "ééé"
+  },
+  "errors": {}
+ },
+ {
+  "name": "maxLength fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "name2",
+     "label": "Name2",
+     "type": "text",
+     "maxLength": 3
+    }
+   ]
+  },
+  "values": {
+   "name2": "abcd"
+  },
+  "errors": {
+   "name2": "Name2 must be at most 3 characters"
+  }
+ },
+ {
+  "name": "longText maxLength fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "notes",
+     "label": "Notes",
+     "type": "longText",
+     "maxLength": 2
+    }
+   ]
+  },
+  "values": {
+   "notes": "abc"
+  },
+  "errors": {
+   "notes": "Notes must be at most 2 characters"
+  }
+ },
+ {
+  "name": "number ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number",
+     "min": 1,
+     "max": 10,
+     "step": 1
+    }
+   ]
+  },
+  "values": {
+   "days": 5
+  },
+  "errors": {}
+ },
+ {
+  "name": "number below min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number",
+     "min": 1,
+     "max": 10
+    }
+   ]
+  },
+  "values": {
+   "days": 0
+  },
+  "errors": {
+   "days": "Days must be at least 1"
+  }
+ },
+ {
+  "name": "number above max",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number",
+     "min": 1,
+     "max": 10
+    }
+   ]
+  },
+  "values": {
+   "days": 10.5
+  },
+  "errors": {
+   "days": "Days must be at most 10"
+  }
+ },
+ {
+  "name": "number off step",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number",
+     "min": 0,
+     "step": 5
+    }
+   ]
+  },
+  "values": {
+   "days": 7
+  },
+  "errors": {
+   "days": "Days must be a multiple of 5"
+  }
+ },
+ {
+  "name": "number step from min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number",
+     "min": 1,
+     "step": 5
+    }
+   ]
+  },
+  "values": {
+   "days": 6
+  },
+  "errors": {}
+ },
+ {
+  "name": "number fractional step ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "rate",
+     "label": "Rate",
+     "type": "number",
+     "step": 0.1
+    }
+   ]
+  },
+  "values": {
+   "rate": 0.3
+  },
+  "errors": {}
+ },
+ {
+  "name": "number wrong type",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "days",
+     "label": "Days",
+     "type": "number"
+    }
+   ]
+  },
+  "values": {
+   "days": "5"
+  },
+  "errors": {
+   "days": "Days must be a number"
+  }
+ },
+ {
+  "name": "choice ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "speed": "std"
+  },
+  "errors": {}
+ },
+ {
+  "name": "choice not in options allowOther false",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "allowOther": false
+    }
+   ]
+  },
+  "values": {
+   "speed": "zip"
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice not in options allowOther absent",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "speed": "zip"
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice other accepted allowOther true",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "allowOther": true
+    }
+   ]
+  },
+  "values": {
+   "speed": {
+    "other": "x"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "choice other accepted allowOther absent",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "speed": {
+    "other": "x"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "choice other rejected allowOther false",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "allowOther": false
+    }
+   ]
+  },
+  "values": {
+   "speed": {
+    "other": "x"
+   }
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice other empty text",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "speed": {
+    "other": ""
+   }
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice single given array",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std"
+   ]
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice multiple ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true,
+     "minItems": 1
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std",
+    "exp"
+   ]
+  },
+  "errors": {}
+ },
+ {
+  "name": "choice multiple fewer than minItems",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true,
+     "minItems": 2
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std"
+   ]
+  },
+  "errors": {
+   "speed": "Speed needs at least 2 items"
+  }
+ },
+ {
+  "name": "choice multiple more than maxItems",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true,
+     "maxItems": 1
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std",
+    "exp"
+   ]
+  },
+  "errors": {
+   "speed": "Speed allows at most 1 items"
+  }
+ },
+ {
+  "name": "choice multiple with other",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std",
+    {
+     "other": "x"
+    }
+   ]
+  },
+  "errors": {}
+ },
+ {
+  "name": "choice multiple bad member",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true,
+     "allowOther": false
+    }
+   ]
+  },
+  "values": {
+   "speed": [
+    "std",
+    "zip"
+   ]
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice multiple given scalar",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "speed": "std"
+  },
+  "errors": {
+   "speed": "Speed has an invalid choice"
+  }
+ },
+ {
+  "name": "choice multiple required empty array",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "speed",
+     "label": "Speed",
+     "type": "choice",
+     "options": [
+      {
+       "value": "std",
+       "label": "Standard"
+      },
+      {
+       "value": "exp",
+       "label": "Express"
+      }
+     ],
+     "multiple": true,
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "speed": []
+  },
+  "errors": {
+   "speed": "Speed is required"
+  }
+ },
+ {
+  "name": "email ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "a@b.co"
+  },
+  "errors": {}
+ },
+ {
+  "name": "email fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "nope"
+  },
+  "errors": {
+   "mail": "Mail must be a valid email address"
+  }
+ },
+ {
+  "name": "email display name rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "Bob <a@b.co>"
+  },
+  "errors": {
+   "mail": "Mail must be a valid email address"
+  }
+ },
+ {
+  "name": "url ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "site",
+     "label": "Site",
+     "type": "text",
+     "format": "url"
+    }
+   ]
+  },
+  "values": {
+   "site": "https://example.com/x?y=1"
+  },
+  "errors": {}
+ },
+ {
+  "name": "url fail scheme",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "site",
+     "label": "Site",
+     "type": "text",
+     "format": "url"
+    }
+   ]
+  },
+  "values": {
+   "site": "ftp://example.com"
+  },
+  "errors": {
+   "site": "Site must be a valid URL"
+  }
+ },
+ {
+  "name": "url fail text",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "site",
+     "label": "Site",
+     "type": "text",
+     "format": "url"
+    }
+   ]
+  },
+  "values": {
+   "site": "example"
+  },
+  "errors": {
+   "site": "Site must be a valid URL"
+  }
+ },
+ {
+  "name": "phone ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tel",
+     "label": "Tel",
+     "type": "text",
+     "format": "phone"
+    }
+   ]
+  },
+  "values": {
+   "tel": "+1 (555) 123-4567"
+  },
+  "errors": {}
+ },
+ {
+  "name": "phone fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tel",
+     "label": "Tel",
+     "type": "text",
+     "format": "phone"
+    }
+   ]
+  },
+  "values": {
+   "tel": "abc"
+  },
+  "errors": {
+   "tel": "Tel must be a valid phone number"
+  }
+ },
+ {
+  "name": "toggle ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "on",
+     "label": "On",
+     "type": "toggle"
+    }
+   ]
+  },
+  "values": {
+   "on": false
+  },
+  "errors": {}
+ },
+ {
+  "name": "toggle wrong type",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "on",
+     "label": "On",
+     "type": "toggle"
+    }
+   ]
+  },
+  "values": {
+   "on": "yes"
+  },
+  "errors": {
+   "on": "On must be true or false"
+  }
+ },
+ {
+  "name": "checkbox required false",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "agree",
+     "label": "Agree",
+     "type": "checkbox",
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "agree": false
+  },
+  "errors": {
+   "agree": "Agree is required"
+  }
+ },
+ {
+  "name": "checkbox required true",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "agree",
+     "label": "Agree",
+     "type": "checkbox",
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "agree": true
+  },
+  "errors": {}
+ },
+ {
+  "name": "toggle required false ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "on",
+     "label": "On",
+     "type": "toggle",
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "on": false
+  },
+  "errors": {}
+ },
+ {
+  "name": "date ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date",
+     "min": "2026-11-01",
+     "max": "2026-11-30"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-11-22"
+  },
+  "errors": {}
+ },
+ {
+  "name": "TZ date unchanged",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-11-22"
+  },
+  "errors": {}
+ },
+ {
+  "name": "date before min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date",
+     "min": "2026-11-01"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-10-31"
+  },
+  "errors": {
+   "d": "D must be on or after 2026-11-01"
+  }
+ },
+ {
+  "name": "date after max",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date",
+     "max": "2026-11-30"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-12-01"
+  },
+  "errors": {
+   "d": "D must be on or before 2026-11-30"
+  }
+ },
+ {
+  "name": "date on bounds ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date",
+     "min": "2026-11-01",
+     "max": "2026-11-30"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-11-30"
+  },
+  "errors": {}
+ },
+ {
+  "name": "date bad format",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date"
+    }
+   ]
+  },
+  "values": {
+   "d": "11/22/2026"
+  },
+  "errors": {
+   "d": "D must be a date (YYYY-MM-DD)"
+  }
+ },
+ {
+  "name": "date impossible day",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-02-30"
+  },
+  "errors": {
+   "d": "D must be a date (YYYY-MM-DD)"
+  }
+ },
+ {
+  "name": "date with time rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "d",
+     "label": "D",
+     "type": "date"
+    }
+   ]
+  },
+  "values": {
+   "d": "2026-11-22T00:00:00Z"
+  },
+  "errors": {
+   "d": "D must be a date (YYYY-MM-DD)"
+  }
+ },
+ {
+  "name": "time ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "t",
+     "label": "T",
+     "type": "time"
+    }
+   ]
+  },
+  "values": {
+   "t": "09:30"
+  },
+  "errors": {}
+ },
+ {
+  "name": "time 25:00",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "t",
+     "label": "T",
+     "type": "time"
+    }
+   ]
+  },
+  "values": {
+   "t": "25:00"
+  },
+  "errors": {
+   "t": "T must be a time (HH:MM)"
+  }
+ },
+ {
+  "name": "time no leading zero rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "t",
+     "label": "T",
+     "type": "time"
+    }
+   ]
+  },
+  "values": {
+   "t": "9:30"
+  },
+  "errors": {
+   "t": "T must be a time (HH:MM)"
+  }
+ },
+ {
+  "name": "time before min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "t",
+     "label": "T",
+     "type": "time",
+     "min": "08:00"
+    }
+   ]
+  },
+  "values": {
+   "t": "07:59"
+  },
+  "errors": {
+   "t": "T must be at or after 08:00"
+  }
+ },
+ {
+  "name": "time after max",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "t",
+     "label": "T",
+     "type": "time",
+     "max": "17:00"
+    }
+   ]
+  },
+  "values": {
+   "t": "17:01"
+  },
+  "errors": {
+   "t": "T must be at or before 17:00"
+  }
+ },
+ {
+  "name": "datetime with offset ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:30:00+10:00"
+  },
+  "errors": {}
+ },
+ {
+  "name": "datetime Z ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:30:00Z"
+  },
+  "errors": {}
+ },
+ {
+  "name": "datetime without offset",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:30:00"
+  },
+  "errors": {
+   "dt": "Dt must be a date and time with a UTC offset"
+  }
+ },
+ {
+  "name": "datetime date only",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22"
+  },
+  "errors": {
+   "dt": "Dt must be a date and time with a UTC offset"
+  }
+ },
+ {
+  "name": "datetime before min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime",
+     "min": "2026-11-22T00:00:00-08:00"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:00:00+10:00"
+  },
+  "errors": {
+   "dt": "Dt must be at or after 2026-11-22T00:00:00-08:00"
+  }
+ },
+ {
+  "name": "datetime min compares instants ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime",
+     "min": "2026-11-22T00:00:00-08:00"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T08:00:00Z"
+  },
+  "errors": {}
+ },
+ {
+  "name": "datetime after max",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime",
+     "max": "2026-11-22T00:00:00Z"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T00:00:01Z"
+  },
+  "errors": {
+   "dt": "Dt must be at or before 2026-11-22T00:00:00Z"
+  }
+ },
+ {
+  "name": "dateRange ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "presets": [
+      "today",
+      "last7d"
+     ]
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-16",
+    "to": "2026-11-22",
+    "preset": "last7d"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "dateRange same day ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-22",
+    "to": "2026-11-22"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "dateRange from after to",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-23",
+    "to": "2026-11-22"
+   }
+  },
+  "errors": {
+   "r": "R: start must be on or before end"
+  }
+ },
+ {
+  "name": "dateRange missing end",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-22"
+   }
+  },
+  "errors": {
+   "r": "R needs a start and end date"
+  }
+ },
+ {
+  "name": "dateRange bad date",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "x",
+    "to": "2026-11-22"
+   }
+  },
+  "errors": {
+   "r": "R must be a date range"
+  }
+ },
+ {
+  "name": "dateRange not object",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": "2026-11-22"
+  },
+  "errors": {
+   "r": "R must be a date range"
+  }
+ },
+ {
+  "name": "dateRange preset not allowed",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "presets": [
+      "today"
+     ]
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-16",
+    "to": "2026-11-22",
+    "preset": "last7d"
+   }
+  },
+  "errors": {
+   "r": "R has an invalid preset"
+  }
+ },
+ {
+  "name": "dateRange unknown preset",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-16",
+    "to": "2026-11-22",
+    "preset": "bogus"
+   }
+  },
+  "errors": {
+   "r": "R has an invalid preset"
+  }
+ },
+ {
+  "name": "dateRange below min",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "min": "2026-11-20"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-19",
+    "to": "2026-11-22"
+   }
+  },
+  "errors": {
+   "r": "R must be on or after 2026-11-20"
+  }
+ },
+ {
+  "name": "dateRange above max",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "max": "2026-11-20"
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-19",
+    "to": "2026-11-22"
+   }
+  },
+  "errors": {
+   "r": "R must be on or before 2026-11-20"
+  }
+ },
+ {
+  "name": "dateRange required missing",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "required": true
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "r": "R is required"
+  }
+ },
+ {
+  "name": "tags ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tg",
+     "label": "Tg",
+     "type": "tags",
+     "minItems": 1,
+     "maxItems": 3
+    }
+   ]
+  },
+  "values": {
+   "tg": [
+    "a",
+    "b"
+   ]
+  },
+  "errors": {}
+ },
+ {
+  "name": "tags too few",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tg",
+     "label": "Tg",
+     "type": "tags",
+     "minItems": 2
+    }
+   ]
+  },
+  "values": {
+   "tg": [
+    "a"
+   ]
+  },
+  "errors": {
+   "tg": "Tg needs at least 2 items"
+  }
+ },
+ {
+  "name": "tags too many",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tg",
+     "label": "Tg",
+     "type": "tags",
+     "maxItems": 1
+    }
+   ]
+  },
+  "values": {
+   "tg": [
+    "a",
+    "b"
+   ]
+  },
+  "errors": {
+   "tg": "Tg allows at most 1 items"
+  }
+ },
+ {
+  "name": "tags wrong type",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tg",
+     "label": "Tg",
+     "type": "tags"
+    }
+   ]
+  },
+  "values": {
+   "tg": [
+    "a",
+    1
+   ]
+  },
+  "errors": {
+   "tg": "Tg must be a list of text"
+  }
+ },
+ {
+  "name": "tags required empty",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tg",
+     "label": "Tg",
+     "type": "tags",
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "tg": []
+  },
+  "errors": {
+   "tg": "Tg is required"
+  }
+ },
+ {
+  "name": "table row ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tb",
+     "label": "Tb",
+     "type": "table",
+     "columns": [
+      {
+       "id": "npi",
+       "label": "NPI"
+      }
+     ],
+     "rows": [
+      {
+       "npi": "1",
+       "n": "A"
+      },
+      {
+       "npi": "2",
+       "n": "B"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "tb": {
+    "npi": "1",
+    "n": "A"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "table rows array ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tb",
+     "label": "Tb",
+     "type": "table",
+     "rows": [
+      {
+       "npi": "1",
+       "n": "A"
+      },
+      {
+       "npi": "2",
+       "n": "B"
+      }
+     ],
+     "minItems": 1
+    }
+   ]
+  },
+  "values": {
+   "tb": [
+    {
+     "npi": "1",
+     "n": "A"
+    },
+    {
+     "npi": "2",
+     "n": "B"
+    }
+   ]
+  },
+  "errors": {}
+ },
+ {
+  "name": "table row not in rows",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tb",
+     "label": "Tb",
+     "type": "table",
+     "rows": [
+      {
+       "npi": "1",
+       "n": "A"
+      },
+      {
+       "npi": "2",
+       "n": "B"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "tb": {
+    "npi": "9",
+    "n": "Z"
+   }
+  },
+  "errors": {
+   "tb": "Tb has an invalid selection"
+  }
+ },
+ {
+  "name": "table too few",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tb",
+     "label": "Tb",
+     "type": "table",
+     "rows": [
+      {
+       "npi": "1",
+       "n": "A"
+      },
+      {
+       "npi": "2",
+       "n": "B"
+      }
+     ],
+     "minItems": 2
+    }
+   ]
+  },
+  "values": {
+   "tb": [
+    {
+     "npi": "1",
+     "n": "A"
+    }
+   ]
+  },
+  "errors": {
+   "tb": "Tb needs at least 2 items"
+  }
+ },
+ {
+  "name": "table wrong type",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "tb",
+     "label": "Tb",
+     "type": "table",
+     "rows": [
+      {
+       "npi": "1",
+       "n": "A"
+      },
+      {
+       "npi": "2",
+       "n": "B"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "tb": "x"
+  },
+  "errors": {
+   "tb": "Tb has an invalid selection"
+  }
+ },
+ {
+  "name": "rule after ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "start",
+     "label": "Start",
+     "type": "date"
+    },
+    {
+     "name": "end",
+     "label": "End",
+     "type": "date"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "start",
+      "end"
+     ],
+     "message": "End must be after start"
+    }
+   ]
+  },
+  "values": {
+   "start": "2026-11-01",
+   "end": "2026-11-02"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule after fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "start",
+     "label": "Start",
+     "type": "date"
+    },
+    {
+     "name": "end",
+     "label": "End",
+     "type": "date"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "start",
+      "end"
+     ],
+     "message": "End must be after start"
+    }
+   ]
+  },
+  "values": {
+   "start": "2026-11-02",
+   "end": "2026-11-02"
+  },
+  "errors": {
+   "": "End must be after start"
+  }
+ },
+ {
+  "name": "rule after skipped when empty",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "start",
+     "label": "Start",
+     "type": "date"
+    },
+    {
+     "name": "end",
+     "label": "End",
+     "type": "date"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "start",
+      "end"
+     ],
+     "message": "End must be after start"
+    }
+   ]
+  },
+  "values": {
+   "start": "2026-11-02"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule notBefore equal ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "start",
+     "label": "Start",
+     "type": "date"
+    },
+    {
+     "name": "end",
+     "label": "End",
+     "type": "date"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notBefore",
+     "fields": [
+      "start",
+      "end"
+     ],
+     "message": "End can't be before start"
+    }
+   ]
+  },
+  "values": {
+   "start": "2026-11-02",
+   "end": "2026-11-02"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule notBefore fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "start",
+     "label": "Start",
+     "type": "date"
+    },
+    {
+     "name": "end",
+     "label": "End",
+     "type": "date"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notBefore",
+     "fields": [
+      "start",
+      "end"
+     ],
+     "message": "End can't be before start"
+    }
+   ]
+  },
+  "values": {
+   "start": "2026-11-03",
+   "end": "2026-11-02"
+  },
+  "errors": {
+   "": "End can't be before start"
+  }
+ },
+ {
+  "name": "rule after datetime offsets",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "a",
+     "label": "A",
+     "type": "datetime"
+    },
+    {
+     "name": "b",
+     "label": "B",
+     "type": "datetime"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "a",
+      "b"
+     ],
+     "message": "B must be after A"
+    }
+   ]
+  },
+  "values": {
+   "a": "2026-11-22T10:00:00+10:00",
+   "b": "2026-11-21T23:00:00Z"
+  },
+  "errors": {
+   "": "B must be after A"
+  }
+ },
+ {
+  "name": "rule after number",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "a",
+     "label": "A",
+     "type": "number"
+    },
+    {
+     "name": "b",
+     "label": "B",
+     "type": "number"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "a",
+      "b"
+     ],
+     "message": "B must exceed A"
+    }
+   ]
+  },
+  "values": {
+   "a": 5,
+   "b": 3
+  },
+  "errors": {
+   "": "B must exceed A"
+  }
+ },
+ {
+  "name": "rule after time",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "a",
+     "label": "A",
+     "type": "time"
+    },
+    {
+     "name": "b",
+     "label": "B",
+     "type": "time"
+    }
+   ],
+   "rules": [
+    {
+     "type": "after",
+     "fields": [
+      "a",
+      "b"
+     ],
+     "message": "B must be after A"
+    }
+   ]
+  },
+  "values": {
+   "a": "09:00",
+   "b": "10:00"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule atLeastOne ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "atLeastOne",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Give p or q"
+    }
+   ]
+  },
+  "values": {
+   "q": "x"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule atLeastOne fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "atLeastOne",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Give p or q"
+    }
+   ]
+  },
+  "values": {
+   "p": ""
+  },
+  "errors": {
+   "": "Give p or q"
+  }
+ },
+ {
+  "name": "rule equal ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "equal",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Must match"
+    }
+   ]
+  },
+  "values": {
+   "p": "x",
+   "q": "x"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule equal fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "equal",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Must match"
+    }
+   ]
+  },
+  "values": {
+   "p": "x",
+   "q": "y"
+  },
+  "errors": {
+   "": "Must match"
+  }
+ },
+ {
+  "name": "rule notEqual fail",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notEqual",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Must differ"
+    }
+   ]
+  },
+  "values": {
+   "p": "x",
+   "q": "x"
+  },
+  "errors": {
+   "": "Must differ"
+  }
+ },
+ {
+  "name": "rule notEqual ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text"
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notEqual",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Must differ"
+    }
+   ]
+  },
+  "values": {
+   "p": "x",
+   "q": "y"
+  },
+  "errors": {}
+ },
+ {
+  "name": "rule ignores hidden field",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "kind",
+     "label": "Kind",
+     "type": "text"
+    },
+    {
+     "name": "p",
+     "label": "P",
+     "type": "text",
+     "showIf": {
+      "field": "kind",
+      "op": "eq",
+      "value": "a"
+     }
+    },
+    {
+     "name": "q",
+     "label": "Q",
+     "type": "text"
+    }
+   ],
+   "rules": [
+    {
+     "type": "atLeastOne",
+     "fields": [
+      "p",
+      "q"
+     ],
+     "message": "Give p or q"
+    }
+   ]
+  },
+  "values": {
+   "kind": "b",
+   "p": "x"
+  },
+  "errors": {
+   "": "Give p or q"
+  }
+ },
+ {
+  "name": "hidden required missing no error",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "temp",
+     "label": "Temp",
+     "type": "toggle"
+    },
+    {
+     "name": "until",
+     "label": "Until",
+     "type": "date",
+     "required": true,
+     "showIf": {
+      "field": "temp",
+      "op": "eq",
+      "value": true
+     }
+    }
+   ]
+  },
+  "values": {
+   "temp": false
+  },
+  "errors": {}
+ },
+ {
+  "name": "hidden field invalid value ignored",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "temp",
+     "label": "Temp",
+     "type": "toggle"
+    },
+    {
+     "name": "until",
+     "label": "Until",
+     "type": "date",
+     "showIf": {
+      "field": "temp",
+      "op": "eq",
+      "value": true
+     }
+    }
+   ]
+  },
+  "values": {
+   "temp": false,
+   "until": "garbage"
+  },
+  "errors": {}
+ },
+ {
+  "name": "shown required missing",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "temp",
+     "label": "Temp",
+     "type": "toggle"
+    },
+    {
+     "name": "until",
+     "label": "Until",
+     "type": "date",
+     "required": true,
+     "showIf": {
+      "field": "temp",
+      "op": "eq",
+      "value": true
+     }
+    }
+   ]
+  },
+  "values": {
+   "temp": true
+  },
+  "errors": {
+   "until": "Until is required"
+  }
+ },
+ {
+  "name": "showIf neq",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "k",
+     "label": "K",
+     "type": "text"
+    },
+    {
+     "name": "x",
+     "label": "X",
+     "type": "text",
+     "required": true,
+     "showIf": {
+      "field": "k",
+      "op": "neq",
+      "value": "a"
+     }
+    }
+   ]
+  },
+  "values": {
+   "k": "a"
+  },
+  "errors": {}
+ },
+ {
+  "name": "showIf in",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "k",
+     "label": "K",
+     "type": "text"
+    },
+    {
+     "name": "x",
+     "label": "X",
+     "type": "text",
+     "required": true,
+     "showIf": {
+      "field": "k",
+      "op": "in",
+      "value": [
+       "a",
+       "b"
+      ]
+     }
+    }
+   ]
+  },
+  "values": {
+   "k": "b"
+  },
+  "errors": {
+   "x": "X is required"
+  }
+ },
+ {
+  "name": "showIf empty",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "k",
+     "label": "K",
+     "type": "text"
+    },
+    {
+     "name": "x",
+     "label": "X",
+     "type": "text",
+     "required": true,
+     "showIf": {
+      "field": "k",
+      "op": "empty"
+     }
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "x": "X is required"
+  }
+ },
+ {
+  "name": "showIf notEmpty hidden",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "k",
+     "label": "K",
+     "type": "text"
+    },
+    {
+     "name": "x",
+     "label": "X",
+     "type": "text",
+     "required": true,
+     "showIf": {
+      "field": "k",
+      "op": "notEmpty"
+     }
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "readOnly changed",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "id",
+     "label": "Id",
+     "type": "text",
+     "readOnly": true,
+     "value": "A1"
+    }
+   ]
+  },
+  "values": {
+   "id": "B2"
+  },
+  "errors": {
+   "id": "Id can't be changed"
+  }
+ },
+ {
+  "name": "readOnly unchanged",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "id",
+     "label": "Id",
+     "type": "text",
+     "readOnly": true,
+     "value": "A1"
+    }
+   ]
+  },
+  "values": {
+   "id": "A1"
+  },
+  "errors": {}
+ },
+ {
+  "name": "readOnly absent ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "id",
+     "label": "Id",
+     "type": "text",
+     "readOnly": true,
+     "value": "A1",
+     "required": true
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "readOnly number unchanged",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "n",
+     "label": "N",
+     "type": "number",
+     "readOnly": true,
+     "value": 3
+    }
+   ]
+  },
+  "values": {
+   "n": 3
+  },
+  "errors": {}
+ },
+ {
+  "name": "readOnly object changed",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "r",
+     "label": "R",
+     "type": "dateRange",
+     "readOnly": true,
+     "value": {
+      "from": "2026-11-01",
+      "to": "2026-11-02"
+     }
+    }
+   ]
+  },
+  "values": {
+   "r": {
+    "from": "2026-11-01",
+    "to": "2026-11-03"
+   }
+  },
+  "errors": {
+   "r": "R can't be changed"
+  }
+ },
+ {
+  "name": "multiple errors one per field",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "a",
+     "label": "A",
+     "type": "text",
+     "required": true
+    },
+    {
+     "name": "b",
+     "label": "B",
+     "type": "number",
+     "min": 5
+    }
+   ]
+  },
+  "values": {
+   "b": 1
+  },
+  "errors": {
+   "a": "A is required",
+   "b": "B must be at least 5"
+  }
+ },
+ {
+  "name": "unknown value keys ignored",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "a",
+     "label": "A",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "a": "x",
+   "zzz": 1
+  },
+  "errors": {}
+ },
+ {
+  "name": "confirm no fields",
+  "ask": {
+   "title": "Sure?",
+   "mode": "confirm"
+  },
+  "values": {},
+  "errors": {}
+ }
+]
