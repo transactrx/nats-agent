@@ -31,6 +31,8 @@ type Stream struct {
 	// progress is Config.Progress: Progress is a no-op when false.
 	progress bool
 	now      func() time.Time // clock for the progress throttle (test seam)
+	// asker is the run's ask state; nil = AskUser returns ErrUnsupported.
+	asker *asker
 
 	mu           sync.Mutex
 	seq          int
