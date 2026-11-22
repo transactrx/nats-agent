@@ -65,7 +65,15 @@ func CheckAsk(a Ask) error {
 			return fmt.Errorf("field %q: %w", f.Name, err)
 		}
 	}
-	return checkRules(a, names)
+	return checkRules(a, fieldTypes(a))
+}
+
+func fieldTypes(a Ask) map[string]string {
+	m := map[string]string{}
+	for _, f := range a.Fields {
+		m[f.Name] = f.Type
+	}
+	return m
 }
 
 func checkField(f Field, names, sections map[string]bool) error {
@@ -120,8 +128,55 @@ func checkField(f Field, names, sections map[string]bool) error {
 	if err := checkBounds(f); err != nil {
 		return err
 	}
+	if f.MinLength > f.MaxLength && f.MaxLength > 0 {
+		return fmt.Errorf("minLength is greater than maxLength")
+	}
+	if f.MinItems > f.MaxItems && f.MaxItems > 0 {
+		return fmt.Errorf("minItems is greater than maxItems")
+	}
+	if f.Step < 0 {
+		return fmt.Errorf("step must be positive")
+	}
+	ids := map[string]bool{}
+	for _, col := range f.Columns {
+		if col.ID == "" {
+			return fmt.Errorf("column id is required")
+		}
+		if ids[col.ID] {
+			return fmt.Errorf("duplicate column id %q", col.ID)
+		}
+		ids[col.ID] = true
+	}
 	if f.Type == TypeChoice {
-		return checkChoice(f)
+		if err := checkChoice(f); err != nil {
+			return err
+		}
+	}
+	for _, p := range []struct {
+		name string
+		v    any
+	}{{"value", f.Value}, {"suggested", f.Suggested}} {
+		if isEmpty(p.v) {
+			continue
+		}
+		if f.Type == TypeChoice {
+			// membership is checked in checkChoice (free text is fine when
+			// allowOther); here only the shape must fit.
+			_, isList := p.v.([]any)
+			_, isMap := p.v.(map[string]any)
+			_, isStr := p.v.(string)
+			if (f.Multiple && !isList) || (!f.Multiple && !isStr && !isMap) {
+				return fmt.Errorf("%s does not fit the field: wrong shape for a choice", p.name)
+			}
+			continue
+		}
+		if msg := checkValue(Field{Name: f.Name, Label: f.Name, Type: f.Type, Format: f.Format,
+			Options: f.Options, Multiple: f.Multiple, AllowOther: f.AllowOther, Min: f.Min, Max: f.Max,
+			Step: f.Step, MinLength: f.MinLength, MaxLength: f.MaxLength, Pattern: f.Pattern,
+			PatternMessage: f.PatternMessage, MinItems: f.MinItems, MaxItems: f.MaxItems,
+			Presets: f.Presets, Rows: f.Rows}, p.v); msg != "" {
+			return fmt.Errorf("%s does not fit the field: %s", p.name, msg)
+		}
 	}
 	return nil
 }
@@ -153,7 +208,38 @@ func checkBounds(f Field) error {
 			}
 		}
 	}
+	if !boundsOrdered(f) {
+		return fmt.Errorf("min is greater than max")
+	}
 	return nil
+}
+
+// boundsOrdered reports min > max for number and date-like bounds.
+func boundsOrdered(f Field) bool {
+	if f.Min == nil || f.Max == nil {
+		return true
+	}
+	if f.Type == TypeNumber {
+		lo, _ := toFloat(f.Min)
+		hi, _ := toFloat(f.Max)
+		return lo <= hi
+	}
+	var parse func(string) (time.Time, bool)
+	switch f.Type {
+	case TypeDate, TypeDateRange:
+		parse = parseDate
+	case TypeTime:
+		parse = parseTime
+	case TypeDateTime:
+		parse = parseDateTime
+	default:
+		return true
+	}
+	ls, _ := f.Min.(string)
+	hs, _ := f.Max.(string)
+	lo, ok1 := parse(ls)
+	hi, ok2 := parse(hs)
+	return !ok1 || !ok2 || !lo.After(hi)
 }
 
 func checkChoice(f Field) error {
@@ -191,7 +277,7 @@ func checkChoice(f Field) error {
 	return nil
 }
 
-func checkRules(a Ask, names map[string]bool) error {
+func checkRules(a Ask, types map[string]string) error {
 	for i, r := range a.Rules {
 		n := i + 1
 		switch r.Type {
@@ -207,9 +293,19 @@ func checkRules(a Ask, names map[string]bool) error {
 			return fmt.Errorf("rule %d: unknown type %q", n, r.Type)
 		}
 		for _, f := range r.Fields {
-			if !names[f] {
+			if _, ok := types[f]; !ok {
 				return fmt.Errorf("rule %d: unknown field %q", n, f)
 			}
+			if r.Type == RuleAfter || r.Type == RuleNotBefore {
+				switch types[f] {
+				case TypeNumber, TypeDate, TypeTime, TypeDateTime:
+				default:
+					return fmt.Errorf("rule %d: %s needs number, date, time or datetime fields (%q is %s)", n, r.Type, f, types[f])
+				}
+			}
+		}
+		if (r.Type == RuleAfter || r.Type == RuleNotBefore) && types[r.Fields[0]] != types[r.Fields[1]] {
+			return fmt.Errorf("rule %d: %s needs two fields of the same type", n, r.Type)
 		}
 		if r.Message == "" {
 			return fmt.Errorf("rule %d: message is required", n)

@@ -2840,6 +2840,177 @@
   "errors": {}
  },
  {
+  "name": "email quoted local part rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "\"a b\"@c.co"
+  },
+  "errors": {
+   "mail": "Mail must be a valid email address"
+  }
+ },
+ {
+  "name": "email without dot in domain accepted",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "a@b"
+  },
+  "errors": {}
+ },
+ {
+  "name": "email trailing dot rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": "a@b.co."
+  },
+  "errors": {
+   "mail": "Mail must be a valid email address"
+  }
+ },
+ {
+  "name": "email surrounding spaces rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "mail",
+     "label": "Mail",
+     "type": "text",
+     "format": "email"
+    }
+   ]
+  },
+  "values": {
+   "mail": " a@b.co "
+  },
+  "errors": {
+   "mail": "Mail must be a valid email address"
+  }
+ },
+ {
+  "name": "pattern unanchored matches mid-string",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "code",
+     "label": "Code",
+     "type": "text",
+     "pattern": "[0-9]{3}"
+    }
+   ]
+  },
+  "values": {
+   "code": "ab123cd"
+  },
+  "errors": {}
+ },
+ {
+  "name": "pattern unanchored no match",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "code",
+     "label": "Code",
+     "type": "text",
+     "pattern": "[0-9]{3}"
+    }
+   ]
+  },
+  "values": {
+   "code": "ab12cd"
+  },
+  "errors": {
+   "code": "Code has an invalid format"
+  }
+ },
+ {
+  "name": "datetime fractional seconds accepted",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:30:00.123+10:00"
+  },
+  "errors": {}
+ },
+ {
+  "name": "datetime lowercase z rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22T09:30:00z"
+  },
+  "errors": {
+   "dt": "Dt must be a date and time with a UTC offset"
+  }
+ },
+ {
+  "name": "datetime lowercase t rejected",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "dt",
+     "label": "Dt",
+     "type": "datetime"
+    }
+   ]
+  },
+  "values": {
+   "dt": "2026-11-22t09:30:00Z"
+  },
+  "errors": {
+   "dt": "Dt must be a date and time with a UTC offset"
+  }
+ },
+ {
   "name": "confirm no fields",
   "ask": {
    "title": "Sure?",

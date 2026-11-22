@@ -7,9 +7,25 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+var reCache sync.Map // pattern -> *regexp.Regexp
+
+// compiled caches compiled patterns; invalid ones are not cached.
+func compiled(p string) (*regexp.Regexp, error) {
+	if re, ok := reCache.Load(p); ok {
+		return re.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(p)
+	if err != nil {
+		return nil, err
+	}
+	reCache.Store(p, re)
+	return re, nil
+}
 
 var phoneRE = regexp.MustCompile(`^\+?[0-9 ()-]{7,20}$`)
 
@@ -41,7 +57,7 @@ func checkText(f Field, v any) string {
 		}
 	}
 	if f.Pattern != "" {
-		if re, err := regexp.Compile(f.Pattern); err == nil && !re.MatchString(s) {
+		if re, err := compiled(f.Pattern); err == nil && !re.MatchString(s) {
 			if f.PatternMessage != "" {
 				return f.PatternMessage
 			}

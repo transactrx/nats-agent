@@ -89,6 +89,25 @@ func TestCheckAskErrors(t *testing.T) {
 		{"rule bad type", Ask{Title: "T", Fields: okAsk().Fields, Rules: []Rule{{Type: "xor", Fields: []string{"a"}, Message: "m"}}}, `rule 1: unknown type`},
 		{"rule needs two", Ask{Title: "T", Fields: okAsk().Fields, Rules: []Rule{{Type: RuleAfter, Fields: []string{"a"}, Message: "m"}}}, `rule 1: after needs exactly 2 fields`},
 		{"rule no message", Ask{Title: "T", Fields: okAsk().Fields, Rules: []Rule{{Type: RuleAtLeastOne, Fields: []string{"a"}}}}, `rule 1: message is required`},
+		{"number min > max", bad(Field{Name: "a", Type: TypeNumber, Min: 5.0, Max: 1.0}), `min is greater than max`},
+		{"date min > max", bad(Field{Name: "a", Type: TypeDate, Min: "2026-11-30", Max: "2026-11-01"}), `min is greater than max`},
+		{"time min > max", bad(Field{Name: "a", Type: TypeTime, Min: "10:00", Max: "09:00"}), `min is greater than max`},
+		{"datetime min > max", bad(Field{Name: "a", Type: TypeDateTime, Min: "2026-11-22T10:00:00Z", Max: "2026-11-22T09:00:00Z"}), `min is greater than max`},
+		{"minLength > maxLength", bad(Field{Name: "a", Type: TypeText, MinLength: 5, MaxLength: 2}), `minLength is greater than maxLength`},
+		{"minItems > maxItems", bad(Field{Name: "a", Type: TypeTags, MinItems: 3, MaxItems: 1}), `minItems is greater than maxItems`},
+		{"negative step", bad(Field{Name: "a", Type: TypeNumber, Step: -1}), `step must be positive`},
+		{"empty column id", bad(Field{Name: "a", Type: TypeTable, Columns: []Column{{ID: ""}}}), `column id is required`},
+		{"duplicate column id", bad(Field{Name: "a", Type: TypeTable, Columns: []Column{{ID: "x"}, {ID: "x"}}}), `duplicate column id "x"`},
+		{"date suggested not a date", bad(Field{Name: "a", Type: TypeDate, Suggested: "x"}), `suggested does not fit the field`},
+		{"number suggested text", bad(Field{Name: "a", Type: TypeNumber, Suggested: "abc"}), `suggested does not fit the field`},
+		{"number value text", bad(Field{Name: "a", Type: TypeNumber, Value: "abc"}), `value does not fit the field`},
+		{"toggle value text", bad(Field{Name: "a", Type: TypeToggle, Value: "yes"}), `value does not fit the field`},
+		{"tags value numbers", bad(Field{Name: "a", Type: TypeTags, Value: []any{1.0}}), `value does not fit the field`},
+		{"dateRange value text", bad(Field{Name: "a", Type: TypeDateRange, Value: "2026-11-22"}), `value does not fit the field`},
+		{"rule after on text", Ask{Title: "T", Fields: []Field{{Name: "a", Type: TypeText}, {Name: "b", Type: TypeText}}, Rules: []Rule{{Type: RuleAfter, Fields: []string{"a", "b"}, Message: "m"}}}, `rule 1: after needs number, date, time or datetime fields`},
+		{"rule notBefore mixed types", Ask{Title: "T", Fields: []Field{{Name: "a", Type: TypeDate}, {Name: "b", Type: TypeTime}}, Rules: []Rule{{Type: RuleNotBefore, Fields: []string{"a", "b"}, Message: "m"}}}, `rule 1: notBefore needs two fields of the same type`},
+		{"showIf in non-array", Ask{Title: "T", Fields: []Field{{Name: "a", Type: TypeText}, {Name: "b", Type: TypeText, ShowIf: &Condition{Field: "a", Op: OpIn, Value: "x"}}}}, `showIf op in needs an array value`},
+		{"lookahead pattern (RE2 invalid)", bad(Field{Name: "code", Type: TypeText, Pattern: "^(?=.*[A-Z]).+$"}), `field "code": invalid pattern`},
 		{"over 32KB", big, "ask too large"},
 	}
 	for _, c := range cases {
@@ -117,6 +136,18 @@ func TestCheckAskFromJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"title":"T","fields":[{"name":"n","type":"number","min":1,"max":5}]}`), &a); err != nil {
 		t.Fatal(err)
 	}
+	if err := CheckAsk(a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckAskValueFitsOK(t *testing.T) {
+	a := decodeAsk(t, `{"title":"T","mode":"edit","fields":[
+	 {"name":"d","type":"date","value":"2026-11-22","suggested":"2026-11-23"},
+	 {"name":"n","type":"number","suggested":3},
+	 {"name":"r","type":"dateRange","value":{"from":"2026-11-01","to":"2026-11-02"}},
+	 {"name":"tg","type":"tags","suggested":["a"]},
+	 {"name":"c","type":"choice","options":[{"value":"x"}],"suggested":"y"}]}`)
 	if err := CheckAsk(a); err != nil {
 		t.Fatal(err)
 	}
