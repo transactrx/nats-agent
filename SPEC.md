@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.6 (draft)
+# NATS Agent Protocol — Specification v1.7 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -674,6 +674,7 @@ ended the turn. Clients ignore unknown values.
 | `subagent_idle` | A consulted agent stopped making progress |
 | `token_rotation_failed` | No fresh token could be delivered before the current one ran low |
 | `unavailable` | Operational stop: a service the turn needs was unavailable |
+| `awaiting_input` | An ask (§14) went unanswered within its live wait and is parked; answer it with a new turn (`inputs`) |
 
 Stored history messages (`sessionsGet` `messages[]`, §7) may carry
 `incomplete`: absent for a complete message, otherwise the reason it was cut
@@ -794,3 +795,154 @@ receiver reads depth 0. A scheduled run is an entry.
 An agent that upgrades and delegates must set `Orchestrator: true`.
 Enforcement is caller-asserted: a caller that forges depth 0 on raw NATS is
 out of scope (NATS publish permissions or a signed depth are later work).
+
+## 14. Asking the user (v1.7)
+
+Protocol 1.7 lets an agent stop mid-turn and ask the human a structured
+question (one field) or fill a form (several fields), then continue with the
+validated answer. Every addition is optional; see §14.7.
+
+### 14.1 Opt-in (both sides, per run)
+
+- Card: `capabilities.userInput: true` — the agent may ask.
+- Request: `ChatRequest.userInput: {"supported": true}` — the caller can show
+  an ask to a human and route the answer back, for this run.
+- Ack: `caps.inputSubject` is present **only when both** opted in. It is a
+  per-run subject with an unguessable token, `trx.agent.<name>.input.<token>`
+  (like `renewSubject`, §12.1). Callers decide per run from the ack.
+
+When either side did not opt in, the agent's `AskUser` returns
+`ErrUnsupported` at once: no event, no wait. The model is told it cannot ask
+here and proceeds as before. An agent never waits for an answer nobody can
+give.
+
+```json
+{ "accepted": true, "runId": "run_01HZY...", "caps": { "inputSubject": "trx.agent.copayAssistant.input.Q2x0Yk..." } }
+```
+
+### 14.2 Events (agent → caller)
+
+Two `data` kinds on the event stream (§5.3):
+
+```json
+{ "type": "data", "kind": "ask", "data": { "askId": "ask_...", "waitMs": 300000, "origin": "copayAssistant", "ask": { } } }
+{ "type": "data", "kind": "askClosed", "data": { "askId": "ask_...", "status": "answered" } }
+```
+
+- `ask`: `ask` is the Ask (§14.6); `waitMs` is the live window; `origin` is
+  the asking agent's name (relays may prepend their own, reading like a
+  path).
+- `askClosed.status` is `answered`, `skipped`, `parked` or `superseded`
+  (the user sent a message instead of answering). Exactly one `askClosed`
+  follows every `ask`, whatever closed it, before the terminal event, so a
+  card never stays open.
+- Terminal `done` carries `reason: "awaiting_input"` (§12.5) when the turn
+  ended because an ask was parked. Clients ignore unknown reasons.
+- Every event except `ping` counts as progress for idle cuts (§12.3).
+
+### 14.3 Input subject
+
+The caller sends a NATS request to `caps.inputSubject`:
+
+```json
+{ "runId": "run_01HZY...", "askId": "ask_...", "action": "submit", "values": { } }
+```
+
+`action` is `submit` or `skip`. The reply is `{"accepted": true}` or
+`{"accepted": false, "reason": "...", "errors": { }}`:
+
+| `reason` | Meaning |
+|---|---|
+| `unknown_ask` | No such ask in this run (wrong `runId` or `askId`) |
+| `closed` | The ask was already closed (answered, skipped, parked, superseded) |
+| `invalid` | Unparseable request, unknown `action`, or values failed validation; `errors` maps field name to message (the `""` key = form-level, e.g. a rule) |
+| `busy` | Reserved. Never sent: one open ask per run is enforced agent-side |
+
+- The agent validates `values` against the ask (§14.6) before its handler or
+  the model sees them. An `invalid` answer leaves the ask open for a retry.
+- The first valid answer wins; a concurrent loser gets `closed`.
+- After the run ends the subscription is gone: a late answer gets no
+  responder (NATS "no responders"/timeout). The caller then answers via
+  §14.4 if the ask was parked.
+
+### 14.4 Answer-only turns (answering a parked ask)
+
+When the live wait expires, the agent parks the ask and ends the turn
+(`awaiting_input`). The caller answers with a new `chat` turn carrying
+`ChatRequest.inputs`:
+
+```json
+{ "inputs": [ { "askId": "ask_...", "action": "submit", "values": { }, "ask": { } } ] }
+```
+
+`ask` is the original Ask, so a stateless agent can validate and understand
+the answer. The agent validates each entry (ask well formed, action known,
+values valid) and drops bad ones. `message` may be empty **only** when the
+agent opted in (`capabilities.userInput`) and at least one input is valid;
+otherwise an empty message is still a 400 missing-field error. Agents that
+did not opt in ignore `inputs`. How valid inputs reach the model is the
+agent's choice (Go: `Turn.ValidInputs`, `ask.FormatForModel`).
+
+**Security.** `inputs` are caller-asserted: they carry no more authority than
+the message text the same caller sends under the same identity (§5.1,
+IDENTITY-AND-AUTHORITY.md). An agent that takes a side effect on a resumed
+answer MUST verify it against its own record (for example the stored ask,
+user and session), never the request's copy of the ask or values.
+
+### 14.5 Timing
+
+The live wait is the agent's (Go: `Config.AskWait`, env `AGENT_ASK_WAIT`,
+default 5 min) and is announced as `waitMs`. It should stay shorter than any
+caller idle window; ask events count as progress.
+
+### 14.6 The Ask schema
+
+One model tool, `request_user_input`, carries every question. The schema,
+value encodings, limits and validator are specified by `pkg/ask` (Go is the
+source of truth; `testdata/ask-vectors.json` holds shared test vectors). In
+summary:
+
+- Ask: `title` (required, ≤120 chars), `description` (≤500), `mode`
+  (`ask` default, `create`, `edit`, `confirm`), `danger`, `submitLabel`,
+  `sections[]`, `fields[]` (0–30; 0 only for `confirm`), `rules[]`.
+- Field `type`: `text` (`format` email/url/phone), `longText`, `number`,
+  `choice` (`options`, `multiple`, `allowOther`), `toggle`, `checkbox`,
+  `date`, `time`, `datetime`, `dateRange`, `tags`, `table`; plus
+  `required`, `readOnly`, `value` (prefill), `suggested`, bounds
+  (`min`/`max`/`step`, lengths, `pattern`, item counts), `showIf`.
+- Rules: `after`, `notBefore`, `atLeastOne`, `equal`, `notEqual`.
+- Value encodings (timezone-safe): `date` `"YYYY-MM-DD"`; `time` `"HH:MM"`;
+  `datetime` RFC 3339 with offset; `dateRange` `{"from","to"}` (+ `preset`);
+  `choice` a value or array, Other as `{"other": "text"}`; `tags` string[];
+  `table` row object(s); `number` number; `toggle`/`checkbox` bool.
+- Limits: 30 fields, 8 sections, 200 options, 50 table rows, 32 KB payload.
+  An ask over a limit is a tool error to the model, which can retry.
+- Validation covers required, type/format, bounds, options, date bounds,
+  rules, read-only fields unchanged; fields hidden by `showIf` are ignored.
+- The answer given to the model: `{"status":"submitted","values":{},
+  "display":{},"changed":[]}` (`changed` in edit mode), `{"status":"skipped"}`,
+  or a superseded answer carrying the user's message text.
+
+### 14.7 Compatibility
+
+- Every 1.7 field, kind and reason is optional; no receiver requires any.
+- Agent without `userInput`: never sends `ask`, `askClosed`, or
+  `inputSubject`; ignores `userInput` and `inputs`; empty message stays 400.
+- Caller without `userInput.supported`: gets no `inputSubject`; the agent's
+  `AskUser` returns `ErrUnsupported`. Old callers ignore `ask`/`askClosed`
+  (unknown data kinds, §5.3) and `awaiting_input` (§12.5).
+- A caller that sends `userInput` to an older agent gets no `caps.inputSubject`
+  and must not present asks for that run.
+
+### 14.8 Go API notes (non-normative)
+
+- `Stream.AskUser(ctx, ask.Ask)` returns the answer, or `ErrUnsupported`,
+  `ErrSkipped` (with the answer), `ErrSuperseded`, `ErrParked`, `ErrBusy`,
+  `ErrRunEnded`, or the ask's validation error. `ctx` MUST be the run
+  context the handler received (or derived from it) so a cancelled or cut run
+  stops the wait.
+- After `ErrParked`, call `Stream.Park(askID)` once, right away: it emits
+  `askClosed{parked}` and `done` with `awaiting_input`. Without it the
+  library still closes the card before the terminal event.
+- `Stream.InterruptAsk(text)` closes the open ask as `superseded` (the user
+  typed instead of answering).
