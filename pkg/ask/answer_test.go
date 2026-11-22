@@ -98,3 +98,27 @@ func TestFormatForModel(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestFormatForModelEdgeCases(t *testing.T) {
+	a := Ask{Title: "T", Fields: []Field{
+		{Name: "c", Label: "Choice", Type: TypeChoice, Options: []Option{{Value: "a", Label: "A"}}},
+		{Name: "t", Label: "On", Type: TypeToggle},
+		{Name: "x", Label: "Extra", Type: TypeText, ShowIf: &Condition{Field: "t", Op: OpEq, Value: true}},
+		{Name: "tg", Label: "Tags", Type: TypeTags},
+	}}
+	got := FormatForModel(a, wire.AskInput{Action: wire.InputActionSubmit, Values: map[string]any{
+		"c": map[string]any{"other": "custom"}, "t": false, "x": "hidden", "tg": []any{},
+	}})
+	want := "[Earlier you asked the user: T. They answered: Choice = custom; On = No; Tags = (none)]"
+	if got != want {
+		t.Fatal(got)
+	}
+	got = FormatForModel(Ask{Title: "Sure?", Mode: ModeConfirm}, wire.AskInput{Action: wire.InputActionSubmit})
+	if got != "[Earlier you asked the user: Sure?. They confirmed.]" {
+		t.Fatal(got)
+	}
+	got = FormatForModel(Ask{Title: "T"}, wire.AskInput{Action: wire.InputActionSubmit})
+	if got != "[Earlier you asked the user: T. They submitted it with no values.]" {
+		t.Fatal(got)
+	}
+}

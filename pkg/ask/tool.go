@@ -1,9 +1,12 @@
 package ask
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
+	"sort"
+	"strings"
 )
 
 // ToolName is the model tool that shows the user a form.
@@ -15,17 +18,28 @@ func ToolDescription() string {
 		"Use it as described in the guidance. Returns the values and the labels the user saw, or {\"status\":\"skipped\"}."
 }
 
-func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
-func boolean(desc string) map[string]any {
-	return map[string]any{"type": "boolean", "description": desc}
+func typed(t, desc string) map[string]any {
+	m := map[string]any{"type": t}
+	if desc != "" {
+		m["description"] = desc
+	}
+	return m
 }
-func integer(desc string) map[string]any {
-	return map[string]any{"type": "integer", "description": desc}
-}
+func str(desc string) map[string]any     { return typed("string", desc) }
+func boolean(desc string) map[string]any { return typed("boolean", desc) }
+func integer(desc string) map[string]any { return typed("integer", desc) }
 func enum(desc string, vals ...string) map[string]any {
-	return map[string]any{"type": "string", "enum": vals, "description": desc}
+	m := typed("string", desc)
+	m["enum"] = vals
+	return m
 }
-func anyVal(desc string) map[string]any { return map[string]any{"description": desc} }
+func anyVal(desc string) map[string]any {
+	m := map[string]any{}
+	if desc != "" {
+		m["description"] = desc
+	}
+	return m
+}
 func arr(items map[string]any) map[string]any {
 	return map[string]any{"type": "array", "items": items}
 }
@@ -94,18 +108,77 @@ func ToolInputSchema() map[string]any {
 
 // ParseAsk converts the model's tool input into an Ask and checks it.
 func ParseAsk(input map[string]any) (Ask, error) {
+	if err := unknownKeys(input, reflect.TypeOf(Ask{}), ""); err != nil {
+		return Ask{}, err
+	}
 	b, err := json.Marshal(input)
 	if err != nil {
-		return Ask{}, fmt.Errorf("invalid ask: %w", err)
+		return Ask{}, errors.New("invalid ask: not valid JSON")
 	}
 	var a Ask
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&a); err != nil {
-		return Ask{}, fmt.Errorf("invalid ask: %w", err)
+	if err := json.Unmarshal(b, &a); err != nil {
+		var te *json.UnmarshalTypeError
+		if errors.As(err, &te) {
+			p := te.Field
+			if p == "" {
+				p = "the ask"
+			}
+			return Ask{}, fmt.Errorf("invalid ask: %s has the wrong type", p)
+		}
+		return Ask{}, errors.New("invalid ask: not valid JSON")
 	}
 	if err := CheckAsk(a); err != nil {
 		return Ask{}, err
 	}
 	return a, nil
+}
+
+func jsonKey(f reflect.StructField) string {
+	return strings.Split(f.Tag.Get("json"), ",")[0]
+}
+
+// unknownKeys rejects keys that are not in the schema, naming the path.
+func unknownKeys(v any, t reflect.Type, path string) error {
+	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice {
+		if t.Kind() == reflect.Slice {
+			l, ok := v.([]any)
+			if !ok {
+				return nil
+			}
+			for i, e := range l {
+				if err := unknownKeys(e, t.Elem(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		t = t.Elem()
+	}
+	m, ok := v.(map[string]any)
+	if !ok || t.Kind() != reflect.Struct {
+		return nil
+	}
+	known := map[string]reflect.Type{}
+	for i := 0; i < t.NumField(); i++ {
+		known[jsonKey(t.Field(i))] = t.Field(i).Type
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		ft, ok := known[k]
+		p := k
+		if path != "" {
+			p = path + "." + k
+		}
+		if !ok {
+			return fmt.Errorf("invalid ask: unknown key %q. Remove it; allowed keys are in the tool schema.", p)
+		}
+		if err := unknownKeys(m[k], ft, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }

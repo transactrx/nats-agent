@@ -84,3 +84,41 @@ func TestGuidanceMentionsSuggestNeverDecide(t *testing.T) {
 		t.Fatalf("guidance %d chars", len(Guidance))
 	}
 }
+
+func TestParseAskNestedStrayKeyNamesPath(t *testing.T) {
+	in := map[string]any{"title": "T", "fields": []any{
+		map[string]any{"name": "a", "type": "text"},
+		map[string]any{"name": "b", "type": "text", "bogus": 1},
+	}}
+	_, err := ParseAsk(in)
+	if err == nil || !strings.Contains(err.Error(), "fields[1].bogus") || !strings.Contains(err.Error(), "Remove it") {
+		t.Fatalf("%v", err)
+	}
+	_, err = ParseAsk(map[string]any{"title": "T", "fields": []any{map[string]any{"name": "a", "type": "text", "required": "yes"}}})
+	if err == nil || !strings.Contains(err.Error(), "has the wrong type") || strings.Contains(err.Error(), "Go ") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestSchemaOmitsEmptyDescriptions(t *testing.T) {
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if d, ok := x["description"]; ok && d == "" {
+				t.Error("empty description")
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	b, _ := json.Marshal(ToolInputSchema())
+	var m any
+	_ = json.Unmarshal(b, &m)
+	walk(m)
+}

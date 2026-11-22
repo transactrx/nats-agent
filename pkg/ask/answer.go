@@ -71,6 +71,12 @@ func FormatForModel(a Ask, in wire.AskInput) string {
 			parts = append(parts, f.label()+" = "+d)
 		}
 	}
+	if len(parts) == 0 {
+		if a.Mode == ModeConfirm {
+			return head + "They confirmed.]"
+		}
+		return head + "They submitted it with no values.]"
+	}
 	return head + "They answered: " + strings.Join(parts, "; ") + "]"
 }
 
@@ -123,19 +129,19 @@ func displayValue(f Field, v any) string {
 		for _, x := range list(v) {
 			out = append(out, displayOne(f, x))
 		}
-		return strings.Join(out, ", ")
+		return joinOrNone(out)
 	case TypeTags:
 		var out []string
 		for _, x := range list(v) {
 			out = append(out, fmt.Sprint(x))
 		}
-		return strings.Join(out, ", ")
+		return joinOrNone(out)
 	case TypeTable:
 		var out []string
 		for _, x := range list(v) {
 			out = append(out, rowDisplay(f, x))
 		}
-		return strings.Join(out, ", ")
+		return joinOrNone(out)
 	case TypeDate:
 		if s, ok := v.(string); ok {
 			if t, ok := parseDate(s); ok {
@@ -195,4 +201,11 @@ func rangeDisplay(m map[string]any) string {
 		s = presetNames[p] + " · " + s
 	}
 	return s
+}
+
+func joinOrNone(out []string) string {
+	if len(out) == 0 {
+		return "(none)"
+	}
+	return strings.Join(out, ", ")
 }
