@@ -689,7 +689,7 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		e := nats_service.NewValidationError("invalid request body", wire.CodeInvalidBody, err)
 		return nil, &e
 	}
-	if len(req.Message.Content) == 0 {
+	if len(req.Message.Content) == 0 && len(req.Inputs) == 0 {
 		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
 		return nil, &e
 	}

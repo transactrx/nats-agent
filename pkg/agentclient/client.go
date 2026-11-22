@@ -50,6 +50,13 @@ var (
 	// outcome is unknown (on a timeout the agent may have applied the token
 	// and the reply was lost); retrying with the same token is safe.
 	ErrRenewTransport = errors.New("agentclient: renew transport error")
+	// ErrNoInputSubject: the run offers no input subject (the agent or the
+	// caller did not opt in to asks), so Answer has nowhere to go.
+	ErrNoInputSubject = errors.New("agentclient: run does not accept answers (no input subject)")
+	// ErrRunGone: the run is not live any more (no responders, or no reply
+	// in time), so the answer was not delivered. A parked ask is answered by
+	// the next ChatWith with ChatOptions.Inputs instead.
+	ErrRunGone = errors.New("agentclient: run is not live")
 	// ErrDelegationNotAllowed: the calling turn's agent is not an
 	// orchestrator, so it may not call other agents. Returned before
 	// anything is published.
@@ -329,12 +336,62 @@ func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Ti
 	return Renew(ctx, r.client.nc, r.Caps.RenewSubject, req)
 }
 
+// answerTimeout bounds one Answer request; tests shorten it.
+var answerTimeout = 5 * time.Second
+
+// Answer delivers the user's answer to the live ask askID of this run
+// (action wire.InputActionSubmit or InputActionSkip; values for a submit).
+// The reply says whether it was accepted; a refusal (Accepted false) is a
+// normal result carrying Reason (and Errors per field when invalid), not an
+// error. ErrNoInputSubject when the run offers no input subject (or one that
+// is not this agent's input subject: nothing is sent); ErrRunGone when no one
+// answers (the run ended, or the wait for a reply timed out), in which case
+// a parked ask is answered via ChatOptions.Inputs on the next turn.
+func (r *Run) Answer(ctx context.Context, askID, action string, values map[string]any) (wire.InputResponse, error) {
+	if r.Caps.InputSubject == "" || !ValidInputSubject(r.agent, r.Caps.InputSubject) {
+		return wire.InputResponse{}, ErrNoInputSubject
+	}
+	data, err := json.Marshal(wire.InputRequest{RunID: r.Ack.RunID, AskID: askID, Action: action, Values: values})
+	if err != nil {
+		return wire.InputResponse{}, err
+	}
+	rctx, cancel := context.WithTimeout(ctx, answerTimeout)
+	defer cancel()
+	msg, err := r.client.nc.RequestWithContext(rctx, r.Caps.InputSubject, data)
+	if err != nil {
+		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
+			if cerr := ctx.Err(); cerr != nil && !errors.Is(cerr, context.DeadlineExceeded) {
+				return wire.InputResponse{}, cerr
+			}
+			return wire.InputResponse{}, ErrRunGone
+		}
+		return wire.InputResponse{}, err
+	}
+	var resp wire.InputResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return wire.InputResponse{}, fmt.Errorf("agentclient: input reply %q: %w", msg.Data, err)
+	}
+	return resp, nil
+}
+
+// ValidInputSubject reports whether subject is an input subject of agent:
+// exactly trx.agent.<name>.input.<token>, token non-empty base64url
+// characters. agent may be the base name or a regional alias; see
+// ValidRenewSubject.
+func ValidInputSubject(agent, subject string) bool {
+	return validTokenSubject(agent, subject, "input.")
+}
+
 // ValidRenewSubject reports whether subject is a renew subject of agent:
 // exactly trx.agent.<name>.renew.<token>, token non-empty base64url
 // characters (no wildcard, whitespace or further dots). agent may be the
 // base name or a regional alias <name>_<region>; the subject is built from
 // the base name either way. Send a token only to a subject that passes.
 func ValidRenewSubject(agent, subject string) bool {
+	return validTokenSubject(agent, subject, "renew.")
+}
+
+func validTokenSubject(agent, subject, endpoint string) bool {
 	if agent == "" {
 		return false
 	}
@@ -343,7 +400,7 @@ func ValidRenewSubject(agent, subject string) bool {
 		names = append(names, agent[:i]) // regional alias → base name
 	}
 	for _, name := range names {
-		prefix := wire.AgentSubject(name, "renew.")
+		prefix := wire.AgentSubject(name, endpoint)
 		if tok, ok := strings.CutPrefix(subject, prefix); ok && renewTokenRe.MatchString(tok) {
 			return true
 		}
@@ -475,6 +532,12 @@ type ChatOptions struct {
 	// declares progress (Caps.Progress); for others it is ignored.
 	// 0 = no idle cut.
 	IdleWindow time.Duration
+	// UserInput declares that the caller can show the user an ask form
+	// (sets ChatRequest.userInput). Without it agents never ask.
+	UserInput bool
+	// Inputs are answers to asks parked by an earlier turn, delivered with
+	// this one (ChatRequest.inputs). A chat may then carry no message text.
+	Inputs []wire.AskInput
 }
 
 // Chat starts a streaming chat turn. If req.StreamSubject is empty, a unique
@@ -488,8 +551,14 @@ func (c *Client) Chat(ctx context.Context, agent string, req wire.ChatRequest) (
 
 // ChatWith is Chat with options (see ChatOptions).
 func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatRequest, o ChatOptions) (*Run, error) {
-	if len(req.Message.Content) == 0 {
+	if len(req.Message.Content) == 0 && len(o.Inputs) == 0 {
 		return nil, fmt.Errorf("chat request needs a message with content")
+	}
+	if o.UserInput {
+		req.UserInput = &wire.UserInputSupport{Supported: true}
+	}
+	if len(o.Inputs) > 0 {
+		req.Inputs = o.Inputs
 	}
 	if err := applyDelegation(ctx, &req); err != nil {
 		return nil, err

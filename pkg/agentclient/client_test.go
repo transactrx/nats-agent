@@ -1062,3 +1062,37 @@ func TestApplyDelegationDerivedCtx(t *testing.T) {
 		t.Fatalf("delegation = %+v, want depth 1", req.Delegation)
 	}
 }
+
+func TestValidInputSubject(t *testing.T) {
+	for subj, want := range map[string]bool{
+		"trx.agent.bot.input.abc_DEF-123": true,
+		"trx.agent.bot.input.":            false,
+		"trx.agent.bot.input.a.b":         false,
+		"trx.agent.bot.input.*":           false,
+		"trx.agent.bot.input.>":           false,
+		"trx.agent.other.input.abc":       false,
+		"trx.agent.bot.renew.abc":         false,
+		"trx.agent.bot.input.abc def":     false,
+	} {
+		if got := ValidInputSubject("bot", subj); got != want {
+			t.Errorf("ValidInputSubject(bot, %q) = %v, want %v", subj, got, want)
+		}
+	}
+	if !ValidInputSubject("bot_us", "trx.agent.bot.input.abc") {
+		t.Error("regional alias must map to the base name")
+	}
+	if ValidInputSubject("", "trx.agent..input.abc") {
+		t.Error("empty agent accepted")
+	}
+}
+
+func TestAnswerNoInputSubjectOrForeignSubject(t *testing.T) {
+	r := &Run{agent: "bot"}
+	if _, err := r.Answer(context.Background(), "a", "skip", nil); !errors.Is(err, ErrNoInputSubject) {
+		t.Fatalf("err = %v, want ErrNoInputSubject", err)
+	}
+	r.Caps.InputSubject = "trx.agent.evil.input.abc"
+	if _, err := r.Answer(context.Background(), "a", "skip", nil); !errors.Is(err, ErrNoInputSubject) {
+		t.Fatalf("foreign subject err = %v, want ErrNoInputSubject", err)
+	}
+}
