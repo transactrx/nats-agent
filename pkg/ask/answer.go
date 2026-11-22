@@ -14,6 +14,8 @@ import (
 const (
 	StatusSubmitted = "submitted"
 	StatusSkipped   = "skipped"
+	// StatusSuperseded: the user sent a message instead of answering.
+	StatusSuperseded = "superseded"
 )
 
 // Answer is what the model receives as the tool result.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -108,9 +109,18 @@ func answer(t *testing.T, run *agentclient.Run, req wire.InputRequest) wire.Inpu
 // answerOn is answer on an existing connection (no connect latency).
 func answerOn(t *testing.T, nc *nats.Conn, run *agentclient.Run, req wire.InputRequest) wire.InputResponse {
 	t.Helper()
+	resp, err := answerErr(nc, run, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// answerErr is answerOn without the testing.T, safe off the test goroutine.
+func answerErr(nc *nats.Conn, run *agentclient.Run, req wire.InputRequest) (wire.InputResponse, error) {
 	subj := inputSubject(run)
 	if subj == "" {
-		t.Fatalf("ack has no inputSubject: %+v", run.Ack.Caps)
+		return wire.InputResponse{}, fmt.Errorf("ack has no inputSubject: %+v", run.Ack.Caps)
 	}
 	if req.RunID == "" {
 		req.RunID = run.Ack.RunID
@@ -118,13 +128,13 @@ func answerOn(t *testing.T, nc *nats.Conn, run *agentclient.Run, req wire.InputR
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(subj, data, 3*time.Second)
 	if err != nil {
-		t.Fatalf("input request: %v", err)
+		return wire.InputResponse{}, fmt.Errorf("input request: %w", err)
 	}
 	var resp wire.InputResponse
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("input reply %q: %v", msg.Data, err)
+		return wire.InputResponse{}, fmt.Errorf("input reply %q: %w", msg.Data, err)
 	}
-	return resp
+	return resp, nil
 }
 
 type askEventPayload struct {
@@ -319,16 +329,23 @@ func TestAskDoubleSubmitSecondClosed(t *testing.T) {
 	a, results := startAskAgent(t, askAgentOpts{userInput: true, hold: hold})
 	run := chatInput(t, a, true)
 	p := payloadOf(t, nextKind(t, run, wire.DataKindAsk))
+	nc := streamConn(t)
 	var wg sync.WaitGroup
 	replies := make([]wire.InputResponse, 2)
+	errs := make([]error, 2)
 	for i := range replies {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			replies[i] = answer(t, run, wire.InputRequest{AskID: p.AskID, Action: wire.InputActionSubmit, Values: map[string]any{"day": "2026-11-22"}})
+			replies[i], errs[i] = answerErr(nc, run, wire.InputRequest{AskID: p.AskID, Action: wire.InputActionSubmit, Values: map[string]any{"day": "2026-11-22"}})
 		}()
 	}
 	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	accepted, closed := 0, 0
 	for _, r := range replies {
 		switch {
@@ -404,8 +421,26 @@ func TestAskSubmitRacingParkExactlyOnce(t *testing.T) {
 	run := chatInput(t, a, true)
 	nc := streamConn(t)
 	live, parked := 0, 0
+	closedCount := map[string]int{}
+	countClosed := func(ev wire.AgentEvent) {
+		if ev.Kind == wire.DataKindAskClosed {
+			closedCount[payloadOf(t, ev).AskID]++
+		}
+	}
+	var asked []string
 	for i := range n {
-		p := payloadOf(t, nextKind(t, run, wire.DataKindAsk))
+		var p askEventPayload
+		for p.AskID == "" {
+			ev, ok := <-run.Events
+			if !ok || ev.IsTerminal() {
+				t.Fatalf("iteration %d: stream ended: %+v", i, ev)
+			}
+			countClosed(ev)
+			if ev.Kind == wire.DataKindAsk {
+				p = payloadOf(t, ev)
+			}
+		}
+		asked = append(asked, p.AskID)
 		// Sweep the send time across the expiry (0–29ms vs a 20ms wait,
 		// counted from receipt of the ask event).
 		time.Sleep(time.Duration(i%30) * time.Millisecond)
@@ -425,7 +460,15 @@ func TestAskSubmitRacingParkExactlyOnce(t *testing.T) {
 	}
 	t.Logf("live %d, parked %d", live, parked)
 	close(release)
-	drainRun(run)
+	// Every ask is closed exactly once, parked ones included.
+	for _, ev := range drainRun(run) {
+		countClosed(ev)
+	}
+	for _, id := range asked {
+		if closedCount[id] != 1 {
+			t.Fatalf("ask %s closed %d times, want 1", id, closedCount[id])
+		}
+	}
 }
 
 func TestAskSecondConcurrentBusy(t *testing.T) {
@@ -513,10 +556,102 @@ func TestAskCtxCancelled(t *testing.T) {
 	if !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", r.err)
 	}
-	for _, k := range dataKinds(drainRun(run)) {
-		if k == wire.DataKindAskClosed {
-			t.Fatal("askClosed emitted on ctx cancel")
+	// The card must not stay open: askClosed{parked}, then the terminal.
+	evs := drainRun(run)
+	if kinds := dataKinds(evs); len(kinds) != 1 || kinds[0] != wire.DataKindAskClosed {
+		t.Fatalf("data events after cancel = %v, want [askClosed]", kinds)
+	}
+	assertParkedThenTerminal(t, evs, wire.EventDone)
+}
+
+// assertParkedThenTerminal: the last two events are askClosed{parked} and a
+// terminal of type term.
+func assertParkedThenTerminal(t *testing.T, evs []wire.AgentEvent, term string) {
+	t.Helper()
+	if len(evs) < 2 {
+		t.Fatalf("events = %+v", evs)
+	}
+	closed, last := evs[len(evs)-2], evs[len(evs)-1]
+	if closed.Kind != wire.DataKindAskClosed || payloadOf(t, closed).Status != "parked" {
+		t.Fatalf("second to last event = %+v, want askClosed{parked}", closed)
+	}
+	if last.Type != term {
+		t.Fatalf("terminal = %+v, want %s", last, term)
+	}
+}
+
+// An expired ask whose handler never called Park is still closed as parked
+// before the terminal event, whoever emits it.
+func TestAskParkedWithoutParkClosedAtRunEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(s *Stream)
+		term string
+	}{
+		{"runtimeFallback", func(*Stream) {}, wire.EventDone},
+		{"handlerDone", func(s *Stream) { s.Done(wire.StopEndTurn, nil) }, wire.EventDone},
+		{"handlerError", func(s *Stream) { s.Error("boom", wire.CodeInternal) }, wire.EventError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := make(chan askResult, 1)
+			a, _ := startAskAgent(t, askAgentOpts{userInput: true, wait: 50 * time.Millisecond, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+				ans, err := s.AskUser(ctx, testAsk)
+				results <- askResult{ans, err}
+				tc.end(s)
+				return nil
+			}})
+			run := chatInput(t, a, true)
+			if r := waitResult(t, results); !errors.Is(r.err, ErrParked) {
+				t.Fatalf("err = %v, want ErrParked", r.err)
+			}
+			evs := drainRun(run)
+			n := 0
+			for _, k := range dataKinds(evs) {
+				if k == wire.DataKindAskClosed {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Fatalf("askClosed events = %d, want 1", n)
+			}
+			assertParkedThenTerminal(t, evs, tc.term)
+		})
+	}
+}
+
+// Park after ErrParked emits exactly one askClosed (no second one at run end).
+func TestAskParkEmitsOnce(t *testing.T) {
+	a, _ := startAskAgent(t, askAgentOpts{userInput: true, wait: 50 * time.Millisecond, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+		if ans, err := s.AskUser(ctx, testAsk); errors.Is(err, ErrParked) {
+			s.Park(ans.AskID)
 		}
+		return nil
+	}})
+	evs := drainRun(chatInput(t, a, true))
+	if kinds := dataKinds(evs); len(kinds) != 2 || kinds[1] != wire.DataKindAskClosed {
+		t.Fatalf("data events = %v, want [ask askClosed]", kinds)
+	}
+	assertParkedThenTerminal(t, evs, wire.EventDone)
+}
+
+func TestAskOnTerminalStream(t *testing.T) {
+	results := make(chan askResult, 1)
+	a, _ := startAskAgent(t, askAgentOpts{userInput: true, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+		s.Done(wire.StopEndTurn, nil)
+		start := time.Now()
+		ans, err := s.AskUser(ctx, testAsk)
+		if time.Since(start) > time.Second {
+			err = fmt.Errorf("AskUser waited %s on an ended stream", time.Since(start))
+		}
+		results <- askResult{ans, err}
+		return nil
+	}})
+	run := chatInput(t, a, true)
+	if r := waitResult(t, results); !errors.Is(r.err, ErrRunEnded) {
+		t.Fatalf("err = %v, want ErrRunEnded", r.err)
+	}
+	if kinds := dataKinds(drainRun(run)); len(kinds) != 0 {
+		t.Fatalf("data events %v, want none", kinds)
 	}
 }
 

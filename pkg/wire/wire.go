@@ -288,7 +288,11 @@ const (
 	InputReasonUnknownAsk = "unknown_ask"
 	InputReasonClosed     = "closed"
 	InputReasonInvalid    = "invalid"
-	InputReasonBusy       = "busy"
+	// InputReasonBusy is reserved: the v0.8 runtime never sends it. Answers
+	// to one ask are decided one at a time, so the loser of concurrent
+	// answers gets InputReasonClosed; one open ask per run is enforced by
+	// Stream.AskUser returning ErrBusy.
+	InputReasonBusy = "busy"
 )
 
 // InputRequest (v1.7) answers a live ask of a running turn.

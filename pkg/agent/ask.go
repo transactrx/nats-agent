@@ -32,6 +32,9 @@ var (
 	// ErrSuperseded: the user sent a message instead of answering
 	// (Stream.InterruptAsk). The Answer's Values["text"] carries it.
 	ErrSuperseded = errors.New("the user replied with a message instead")
+	// ErrRunEnded: the stream already sent its terminal event, so nobody
+	// can see or answer an ask.
+	ErrRunEnded = errors.New("the run has already ended")
 )
 
 // askClosed statuses (data event askClosed).
@@ -41,9 +44,6 @@ const (
 	askClosedParked     = "parked"
 	askClosedSuperseded = "superseded"
 )
-
-// StatusSuperseded is the Answer.Status AskUser returns with ErrSuperseded.
-const StatusSuperseded = "superseded"
 
 // defaultAskWait is the live wait when neither Config.AskWait nor
 // AGENT_ASK_WAIT sets one.
@@ -59,6 +59,7 @@ func resolveAskWait(cfg time.Duration) time.Duration {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		}
+		log.Printf("AGENT_ASK_WAIT=%q is not a positive duration; using %s", v, defaultAskWait)
 	}
 	return defaultAskWait
 }
@@ -140,6 +141,9 @@ type asker struct {
 	mu     sync.Mutex
 	cur    *openAsk
 	closed map[string]bool // ids of asks closed earlier in this run
+	// parked is the id of an ask that expired (ErrParked) and still owes
+	// askClosed{parked}: sent by Park, or before the terminal event.
+	parked string
 }
 
 func newAskID() (string, error) {
@@ -242,9 +246,10 @@ func (k *asker) closeLocked(cur *openAsk, out askOutcome) {
 	cur.done <- out
 }
 
-// claim closes cur on AskUser's own side (wait expiry or ctx done); false
-// when another closer won, whose outcome is then on cur.done.
-func (k *asker) claim(cur *openAsk) bool {
+// claim closes cur on AskUser's own side (wait expiry, ctx done, stream
+// ended); false when another closer won, whose outcome is then on cur.done.
+// park records cur as owing askClosed{parked}.
+func (k *asker) claim(cur *openAsk, park bool) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if cur.closed {
@@ -252,7 +257,19 @@ func (k *asker) claim(cur *openAsk) bool {
 	}
 	cur.closed = true
 	k.closed[cur.id] = true
+	if park {
+		k.parked = cur.id
+	}
 	return true
+}
+
+// takeParked returns and clears the pending parked ask id ("" = none).
+func (k *asker) takeParked() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	id := k.parked
+	k.parked = ""
+	return id
 }
 
 // AskUser shows the user a form and waits for the answer. It returns
@@ -263,15 +280,25 @@ func (k *asker) claim(cur *openAsk) bool {
 //   - the answer (nil error) on submit, ErrSkipped (with the answer) on skip,
 //     ErrSuperseded (Values["text"]) on InterruptAsk;
 //   - ErrParked after the live wait: end the turn with Park;
-//   - ctx.Err() when the run ctx ends first.
+//   - ErrRunEnded at once (no event) when the stream is already terminal,
+//     or when it ends while waiting;
+//   - ctx.Err() when ctx ends first.
 //
-// The ask goes out as data/ask {askId, waitMs, origin, ask}; every close but
-// ctx done and the wait expiry emits data/askClosed {askId, status} (Park
-// emits it for the expiry).
+// ctx must be the run ctx the handler received (or derived from it), so a
+// cancelled or cut run stops the wait.
+//
+// The ask goes out as data/ask {askId, waitMs, origin, ask}. Every close
+// emits data/askClosed {askId, status}, so a card never stays open: answered,
+// skipped and superseded here; parked by Park after ErrParked (or, if the
+// handler never calls Park, right before the terminal event); parked here
+// when ctx ends while the stream is still live.
 func (s *Stream) AskUser(ctx context.Context, a ask.Ask) (ask.Answer, error) {
 	k := s.asker
 	if k == nil {
 		return ask.Answer{}, ErrUnsupported
+	}
+	if s.terminated() {
+		return ask.Answer{}, ErrRunEnded
 	}
 	if err := ask.CheckAsk(a); err != nil {
 		return ask.Answer{}, err
@@ -289,6 +316,11 @@ func (s *Stream) AskUser(ctx context.Context, a ask.Ask) (ask.Answer, error) {
 	k.cur = cur
 	k.mu.Unlock()
 
+	// From here InterruptAsk may close cur even before the ask event below
+	// goes out. Harmless: the event is followed at once by askClosed
+	// {superseded}, and the caller sees an ask that opened and closed.
+	// An earlier expired ask the handler did not Park is closed first.
+	s.closeParked()
 	timer := time.NewTimer(k.wait)
 	defer timer.Stop()
 	s.Data(wire.DataKindAsk, struct {
@@ -302,13 +334,21 @@ func (s *Stream) AskUser(ctx context.Context, a ask.Ask) (ask.Answer, error) {
 	select {
 	case out = <-cur.done:
 	case <-timer.C:
-		if k.claim(cur) {
+		if k.claim(cur, true) {
 			return ask.Answer{AskID: id}, ErrParked
 		}
 		out = <-cur.done
 	case <-ctx.Done():
-		if k.claim(cur) {
+		if k.claim(cur, false) {
+			if !s.terminated() {
+				s.askClosed(id, askClosedParked)
+			}
 			return ask.Answer{AskID: id}, ctx.Err()
+		}
+		out = <-cur.done
+	case <-s.stopHB: // closed by the terminal event
+		if k.claim(cur, false) {
+			return ask.Answer{AskID: id}, ErrRunEnded
 		}
 		out = <-cur.done
 	}
@@ -338,7 +378,7 @@ func (s *Stream) InterruptAsk(text string) bool {
 		return false
 	}
 	k.closeLocked(cur, askOutcome{
-		ans:    ask.Answer{AskID: cur.id, Status: StatusSuperseded, Values: map[string]any{"text": text}},
+		ans:    ask.Answer{AskID: cur.id, Status: ask.StatusSuperseded, Values: map[string]any{"text": text}},
 		err:    ErrSuperseded,
 		status: askClosedSuperseded,
 	})
@@ -362,6 +402,24 @@ func (s *Stream) OpenAsk() (string, bool) {
 // Park ends the turn after AskUser returned ErrParked: it emits
 // askClosed{parked} and done with reason awaiting_input.
 func (s *Stream) Park(askID string) {
+	if k := s.asker; k != nil {
+		k.mu.Lock()
+		if k.parked == askID {
+			k.parked = ""
+		}
+		k.mu.Unlock()
+	}
 	s.askClosed(askID, askClosedParked)
 	s.DoneWithReason(wire.StopEndTurn, wire.ReasonAwaitingInput, nil)
+}
+
+// closeParked emits the askClosed{parked} still owed by an expired ask whose
+// handler did not call Park. Called before every terminal event.
+func (s *Stream) closeParked() {
+	if s.asker == nil {
+		return
+	}
+	if id := s.asker.takeParked(); id != "" {
+		s.askClosed(id, askClosedParked)
+	}
 }
