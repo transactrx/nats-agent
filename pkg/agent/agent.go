@@ -689,7 +689,17 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		e := nats_service.NewValidationError("invalid request body", wire.CodeInvalidBody, err)
 		return nil, &e
 	}
-	if len(req.Message.Content) == 0 && len(req.Inputs) == 0 {
+	// Answer-only turns (no message text) need an opted-in agent and at
+	// least one valid input; validation is pure, so it runs before the gate.
+	var inputs []ValidInput
+	if a.cfg.UserInput && len(req.Inputs) > 0 {
+		logger := msg.Logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		inputs = validInputs(req.Inputs, logger)
+	}
+	if len(req.Message.Content) == 0 && len(inputs) == 0 {
 		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
 		return nil, &e
 	}
@@ -718,14 +728,6 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	}
 	if id.Verified {
 		req.UserID = id.UserID
-	}
-	var inputs []ValidInput
-	if a.cfg.UserInput && len(req.Inputs) > 0 {
-		logger := msg.Logger
-		if logger == nil {
-			logger = log.Default()
-		}
-		inputs = validInputs(req.Inputs, logger)
 	}
 	return &Turn{
 		ValidInputs:     inputs,

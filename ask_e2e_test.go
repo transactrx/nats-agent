@@ -216,3 +216,42 @@ func TestLegacyCallerNoUserInput(t *testing.T) {
 		t.Fatalf("Answer err = %v, want ErrNoInputSubject", err)
 	}
 }
+
+// Answer-only turns (empty message + inputs) are accepted only by an opted-in
+// agent and only when at least one input is valid.
+func TestAnswerOnlyTurnGate(t *testing.T) {
+	raw, _ := json.Marshal(e2eAsk)
+	good := wire.AskInput{AskID: "ask_1", Action: wire.InputActionSkip, Ask: raw}
+	bad := wire.AskInput{AskID: "ask_2", Action: "maybe", Ask: raw}
+	chat := func(name string, in ...wire.AskInput) error {
+		req := wire.ChatRequest{SessionID: "s1", Message: wire.Message{Role: "user"}}
+		_, err := agentclient.NewFromConn(testConn(t)).ChatWith(context.Background(), name, req, agentclient.ChatOptions{UserInput: true, Inputs: in})
+		return err
+	}
+	isMissing := func(err error) bool {
+		var se *agentclient.ServiceError
+		return err != nil && errors.As(err, &se) && se.ApiStatusCode == wire.CodeMissingField
+	}
+
+	t.Run("nonOptedRejects", func(t *testing.T) {
+		name, _ := startAskE2EAgent(t, false, time.Minute)
+		if err := chat(name, good); !isMissing(err) {
+			t.Fatalf("err = %v, want missing_field", err)
+		}
+	})
+	t.Run("invalidOnlyRejects", func(t *testing.T) {
+		name, _ := startAskE2EAgent(t, true, time.Minute)
+		if err := chat(name, bad); !isMissing(err) {
+			t.Fatalf("err = %v, want missing_field", err)
+		}
+	})
+	t.Run("oneValidAccepted", func(t *testing.T) {
+		name, results := startAskE2EAgent(t, true, time.Minute)
+		if err := chat(name, bad, good); err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if r := recv(t, results); len(r.vin) != 1 || r.vin[0].AskID != "ask_1" {
+			t.Fatalf("inputs = %+v", r.vin)
+		}
+	})
+}
