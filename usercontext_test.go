@@ -69,7 +69,7 @@ func TestUserContextEndToEnd(t *testing.T) {
 	}
 
 	card, err := c.Card(context.Background(), "ctxBack")
-	if err != nil || !card.Capabilities.UserContext || card.ProtocolVersion != "1.6" {
+	if err != nil || !card.Capabilities.UserContext || card.ProtocolVersion != "1.7" {
 		t.Fatalf("card: %+v %v", card, err)
 	}
 

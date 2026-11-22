@@ -24,7 +24,7 @@ func TestAgentCardAccessRoundTrip(t *testing.T) {
 	if string(data) != "" && containsKey(data, "access") {
 		t.Fatalf("empty access must be omitted: %s", data)
 	}
-	if ProtocolVersion != "1.6" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
+	if ProtocolVersion != "1.7" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
 		t.Fatalf("protocol constants: %s %d %s", ProtocolVersion, CodeForbidden, HeaderIDT)
 	}
 }
@@ -165,5 +165,103 @@ func TestCancelRequestReasonCompat(t *testing.T) {
 	var back CancelRequest
 	if err := json.Unmarshal(data, &back); err != nil || back.Reason != ReasonProgressIdle {
 		t.Fatalf("round trip %s → %+v %v", data, back, err)
+	}
+}
+
+func TestChatRequestV16BytesUnchanged(t *testing.T) {
+	req := ChatRequest{
+		SessionID:     "s1",
+		UserID:        "u1",
+		Message:       Message{Role: "user", Content: []ContentBlock{{Text: "hi"}}},
+		StreamSubject: "x.stream",
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const golden = `{"sessionId":"s1","userId":"u1","message":{"role":"user","content":[{"text":"hi"}]},"streamSubject":"x.stream"}`
+	if string(data) != golden {
+		t.Fatalf("v1.6 bytes changed:\n got %s\nwant %s", data, golden)
+	}
+	if containsKey(data, "userInput") || containsKey(data, "inputs") {
+		t.Fatalf("new keys leaked: %s", data)
+	}
+	caps, _ := json.Marshal(Capabilities{})
+	if strings.Contains(string(caps), "userInput") {
+		t.Fatalf("capabilities leaked userInput: %s", caps)
+	}
+}
+
+func TestAckCapsInputSubjectRoundTrip(t *testing.T) {
+	data, err := json.Marshal(ChatAck{Caps: &AckCaps{InputSubject: "trx.agent.a.input"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"inputSubject":"trx.agent.a.input"`) {
+		t.Fatalf("inputSubject missing: %s", data)
+	}
+	var back ChatAck
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Caps == nil || back.Caps.InputSubject != "trx.agent.a.input" {
+		t.Fatalf("lost: %+v", back.Caps)
+	}
+	empty, _ := json.Marshal(AckCaps{})
+	if strings.Contains(string(empty), "inputSubject") {
+		t.Fatalf("empty must omit: %s", empty)
+	}
+}
+
+func TestAskInputRoundTrip(t *testing.T) {
+	req := ChatRequest{
+		UserInput: &UserInputSupport{Supported: true},
+		Inputs: []AskInput{{
+			AskID:  "a1",
+			Action: InputActionSubmit,
+			Values: map[string]any{"d": "2026-11-22"},
+			Ask:    json.RawMessage(`{"title":"T","fields":[1,2]}`),
+		}},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"userInput":{"supported":true}`, `"askId":"a1"`, `"action":"submit"`, `"values":{"d":"2026-11-22"}`, `"ask":{"title":"T","fields":[1,2]}`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in %s", want, data)
+		}
+	}
+	var back ChatRequest
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.UserInput == nil || !back.UserInput.Supported || len(back.Inputs) != 1 ||
+		string(back.Inputs[0].Ask) != `{"title":"T","fields":[1,2]}` {
+		t.Fatalf("round trip: %+v", back)
+	}
+	// ask omitted when empty
+	d, _ := json.Marshal(AskInput{AskID: "a", Action: InputActionSkip})
+	if strings.Contains(string(d), `"ask"`) {
+		t.Fatalf("ask must be omitted: %s", d)
+	}
+	// input request/response shapes
+	rd, _ := json.Marshal(InputRequest{RunID: "r", AskID: "a", Action: InputActionSubmit, Values: map[string]any{"k": 1}})
+	if string(rd) != `{"runId":"r","askId":"a","action":"submit","values":{"k":1}}` {
+		t.Fatalf("InputRequest: %s", rd)
+	}
+	rs, _ := json.Marshal(InputResponse{Accepted: false, Reason: InputReasonInvalid, Errors: map[string]string{"f": "bad"}})
+	if string(rs) != `{"accepted":false,"reason":"invalid","errors":{"f":"bad"}}` {
+		t.Fatalf("InputResponse: %s", rs)
+	}
+	if DataKindAsk != "ask" || DataKindAskClosed != "askClosed" || ReasonAwaitingInput != "awaiting_input" ||
+		InputReasonUnknownAsk != "unknown_ask" || InputReasonClosed != "closed" || InputReasonBusy != "busy" {
+		t.Fatal("constants")
+	}
+}
+
+func TestProtocolVersion17(t *testing.T) {
+	if ProtocolVersion != "1.7" {
+		t.Fatalf("ProtocolVersion = %s", ProtocolVersion)
 	}
 }
