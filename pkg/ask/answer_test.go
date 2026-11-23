@@ -53,7 +53,7 @@ func TestDisplayVariants(t *testing.T) {
 	}).Display
 	want := map[string]string{
 		"r": "Nov 15 – Nov 22", "r2": "Dec 28, 2026 – Jan 3, 2027", "d": "Nov 22, 2026",
-		"m": "A, B", "o": "custom", "tg": "x, y", "tb": "123", "off": "No",
+		"m": "A, B", "o": "custom", "tg": "x, y", "tb": "123 · Z", "off": "No",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("%v", got)

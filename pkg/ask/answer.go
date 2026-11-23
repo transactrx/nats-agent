@@ -175,15 +175,26 @@ func displayValue(f Field, v any) string {
 	return fmt.Sprint(v)
 }
 
+// rowDisplay: up to the first 3 columns with a value, joined by " · ".
+// Matches the web's rowLabel.
 func rowDisplay(f Field, v any) string {
 	m, ok := v.(map[string]any)
 	if !ok || len(f.Columns) == 0 {
 		return fmt.Sprint(v)
 	}
-	if c, ok := m[f.Columns[0].ID]; ok {
-		return fmt.Sprint(c)
+	var cells []string
+	for i, c := range f.Columns {
+		if i == 3 {
+			break
+		}
+		if x, ok := m[c.ID]; ok && x != nil && x != "" {
+			cells = append(cells, fmt.Sprint(x))
+		}
 	}
-	return fmt.Sprint(v)
+	if len(cells) == 0 {
+		return fmt.Sprint(v)
+	}
+	return strings.Join(cells, " · ")
 }
 
 func rangeDisplay(m map[string]any) string {
