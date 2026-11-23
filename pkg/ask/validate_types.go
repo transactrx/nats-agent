@@ -12,19 +12,42 @@ import (
 	"unicode/utf8"
 )
 
-var reCache sync.Map // pattern -> *regexp.Regexp
+// maxCachedPatterns bounds the compiled-pattern cache: patterns come from
+// asks (incl. caller-supplied inputs), so past the bound they are compiled
+// per use and not kept.
+const maxCachedPatterns = 256
 
-// compiled caches compiled patterns; invalid ones are not cached.
+var reCache = struct {
+	sync.Mutex
+	m map[string]*regexp.Regexp
+}{m: map[string]*regexp.Regexp{}}
+
+// compiled caches compiled patterns (up to maxCachedPatterns); invalid
+// ones are not cached.
 func compiled(p string) (*regexp.Regexp, error) {
-	if re, ok := reCache.Load(p); ok {
-		return re.(*regexp.Regexp), nil
+	reCache.Lock()
+	re, ok := reCache.m[p]
+	reCache.Unlock()
+	if ok {
+		return re, nil
 	}
 	re, err := regexp.Compile(p)
 	if err != nil {
 		return nil, err
 	}
-	reCache.Store(p, re)
+	reCache.Lock()
+	if len(reCache.m) < maxCachedPatterns {
+		reCache.m[p] = re
+	}
+	reCache.Unlock()
 	return re, nil
+}
+
+// cachedPatterns is the cache size (tests).
+func cachedPatterns() int {
+	reCache.Lock()
+	defer reCache.Unlock()
+	return len(reCache.m)
 }
 
 var phoneRE = regexp.MustCompile(`^\+?[0-9 ()-]{7,20}$`)

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +112,20 @@ func TestVisible(t *testing.T) {
 	}
 	if !Visible(a, nil, a.Fields[2]) {
 		t.Fatal("no showIf is visible")
+	}
+}
+
+// I1: the pattern cache never grows past maxCachedPatterns; uncached
+// patterns still compile and match.
+func TestPatternCacheBounded(t *testing.T) {
+	for i := 0; i < maxCachedPatterns+50; i++ {
+		p := "^a{" + strconv.Itoa(i) + "}$"
+		re, err := compiled(p)
+		if err != nil || !re.MatchString(strings.Repeat("a", i)) {
+			t.Fatalf("pattern %q: %v", p, err)
+		}
+	}
+	if n := cachedPatterns(); n > maxCachedPatterns {
+		t.Fatalf("cache size %d > %d", n, maxCachedPatterns)
 	}
 }

@@ -690,16 +690,10 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		return nil, &e
 	}
 	// Answer-only turns (no message text) need an opted-in agent and at
-	// least one valid input; validation is pure, so it runs before the gate.
-	var inputs []ValidInput
-	if a.cfg.UserInput && len(req.Inputs) > 0 {
-		logger := msg.Logger
-		if logger == nil {
-			logger = log.Default()
-		}
-		inputs = validInputs(req.Inputs, logger)
-	}
-	if len(req.Message.Content) == 0 && len(inputs) == 0 {
+	// least one valid input. The cheap gate runs here; the inputs are
+	// validated (patterns compiled) only after Authorize, below.
+	withInputs := a.cfg.UserInput && len(req.Inputs) > 0
+	if len(req.Message.Content) == 0 && !withInputs {
 		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
 		return nil, &e
 	}
@@ -728,6 +722,18 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	}
 	if id.Verified {
 		req.UserID = id.UserID
+	}
+	var inputs []ValidInput
+	if withInputs {
+		logger := msg.Logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		inputs = validateInputs(req.Inputs, logger)
+	}
+	if len(req.Message.Content) == 0 && len(inputs) == 0 {
+		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
+		return nil, &e
 	}
 	return &Turn{
 		ValidInputs:     inputs,

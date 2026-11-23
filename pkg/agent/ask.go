@@ -40,11 +40,14 @@ var (
 
 // askClosed statuses (data event askClosed).
 const (
-	askClosedAnswered   = "answered"
-	askClosedSkipped    = "skipped"
-	askClosedParked     = "parked"
-	askClosedSuperseded = "superseded"
+	askClosedAnswered   = wire.AskClosedAnswered
+	askClosedSkipped    = wire.AskClosedSkipped
+	askClosedParked     = wire.AskClosedParked
+	askClosedSuperseded = wire.AskClosedSuperseded
 )
+
+// maxInputs caps the valid inputs kept from one ChatRequest.
+const maxInputs = 5
 
 // defaultAskWait is the live wait when neither Config.AskWait nor
 // AGENT_ASK_WAIT sets one.
@@ -73,12 +76,20 @@ type ValidInput struct {
 	Answer ask.Answer
 }
 
+// validateInputs is validInputs (a var so tests can observe calls).
+var validateInputs = validInputs
+
 // validInputs checks each entry of inputs: the ask must parse and pass
 // CheckAsk, the action must be submit or skip, and submitted values must
-// validate. Bad entries are logged and dropped.
+// validate. Bad entries are logged and dropped; at most maxInputs valid
+// entries are kept (the rest are logged and dropped unchecked).
 func validInputs(inputs []wire.AskInput, logger *log.Logger) []ValidInput {
 	var out []ValidInput
-	for _, in := range inputs {
+	for i, in := range inputs {
+		if len(out) == maxInputs {
+			logger.Printf("dropping %d inputs past the cap of %d", len(inputs)-i, maxInputs)
+			break
+		}
 		v, reason := validInput(in)
 		if reason != "" {
 			logger.Printf("dropping input askId=%q: %s", in.AskID, reason)
@@ -127,7 +138,10 @@ type openAsk struct {
 	id     string
 	ask    ask.Ask
 	closed bool
-	done   chan askOutcome // buffered 1; sent once, by the closer
+	// opening: OnOpen still runs; the ask is not open to answers,
+	// InterruptAsk or OpenAsk yet (it still makes AskUser busy).
+	opening bool
+	done    chan askOutcome // buffered 1; sent once, by the closer
 }
 
 // asker is a run's ask state. One mutex guards it; the first close
@@ -207,7 +221,7 @@ func (k *asker) apply(body []byte) wire.InputResponse {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	cur := k.cur
-	if cur == nil || cur.id != req.AskID {
+	if cur == nil || cur.id != req.AskID || cur.opening {
 		if k.closed[req.AskID] {
 			return refuse(wire.InputReasonClosed)
 		}
@@ -232,11 +246,26 @@ func (k *asker) apply(body []byte) wire.InputResponse {
 			return resp
 		}
 		out = askOutcome{ans: ask.BuildAnswer(cur.ask, cur.id, req.Values), status: askClosedAnswered}
+	case wire.InputActionSupersede:
+		text, _ := req.Values["text"].(string)
+		if strings.TrimSpace(text) == "" {
+			return refuse(wire.InputReasonInvalid)
+		}
+		out = supersededOutcome(cur.id, text)
 	default:
 		return refuse(wire.InputReasonInvalid)
 	}
 	k.closeLocked(cur, out)
 	return wire.InputResponse{Accepted: true}
+}
+
+// supersededOutcome closes askID as superseded by the user's message text.
+func supersededOutcome(askID, text string) askOutcome {
+	return askOutcome{
+		ans:    ask.Answer{AskID: askID, Status: ask.StatusSuperseded, Values: map[string]any{"text": text}},
+		err:    ErrSuperseded,
+		status: askClosedSuperseded,
+	}
 }
 
 // closeLocked marks cur closed and hands out to the waiting AskUser.
@@ -322,7 +351,7 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 	if err != nil {
 		return ask.Answer{}, err
 	}
-	cur := &openAsk{id: id, ask: a, done: make(chan askOutcome, 1)}
+	cur := &openAsk{id: id, ask: a, done: make(chan askOutcome, 1), opening: o.OnOpen != nil}
 	k.mu.Lock()
 	if k.cur != nil && !k.cur.closed {
 		k.mu.Unlock()
@@ -339,6 +368,9 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 			k.mu.Unlock()
 			return ask.Answer{}, fmt.Errorf("ask %s not opened: %w", id, err)
 		}
+		k.mu.Lock()
+		cur.opening = false
+		k.mu.Unlock()
 	}
 
 	// From here InterruptAsk may close cur even before the ask event below
@@ -348,12 +380,8 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 	s.closeParked()
 	timer := time.NewTimer(k.wait)
 	defer timer.Stop()
-	s.Data(wire.DataKindAsk, struct {
-		AskID  string  `json:"askId"`
-		WaitMs int64   `json:"waitMs"`
-		Origin string  `json:"origin"`
-		Ask    ask.Ask `json:"ask"`
-	}{id, k.wait.Milliseconds(), k.origin, a})
+	raw, _ := json.Marshal(a) // CheckAsk passed: plain data, marshals
+	s.Data(wire.DataKindAsk, wire.AskEvent{AskID: id, WaitMs: k.wait.Milliseconds(), Origin: k.origin, Ask: raw})
 
 	var out askOutcome
 	select {
@@ -382,15 +410,12 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 }
 
 func (s *Stream) askClosed(askID, status string) {
-	s.Data(wire.DataKindAskClosed, struct {
-		AskID  string `json:"askId"`
-		Status string `json:"status"`
-	}{askID, status})
+	s.Data(wire.DataKindAskClosed, wire.AskClosedEvent{AskID: askID, Status: status})
 }
 
 // InterruptAsk closes the open ask as superseded by the user's message text:
 // AskUser returns ErrSuperseded with Values["text"] = text. False when no
-// ask is open.
+// ask is open (none, or its OnOpen still runs).
 func (s *Stream) InterruptAsk(text string) bool {
 	k := s.asker
 	if k == nil {
@@ -399,20 +424,17 @@ func (s *Stream) InterruptAsk(text string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	cur := k.cur
-	if cur == nil || cur.closed {
+	if cur == nil || cur.closed || cur.opening {
 		return false
 	}
-	k.closeLocked(cur, askOutcome{
-		ans:    ask.Answer{AskID: cur.id, Status: ask.StatusSuperseded, Values: map[string]any{"text": text}},
-		err:    ErrSuperseded,
-		status: askClosedSuperseded,
-	})
+	k.closeLocked(cur, supersededOutcome(cur.id, text))
 	return true
 }
 
 // AnswerAsk answers this run's ask in process, exactly like an InputRequest
 // on caps.inputSubject (same validation, same first-wins rule, same reply).
 // For a handler that receives answers on its own route and hands them on.
+// Action supersede (Values["text"]) closes the ask like InterruptAsk.
 // Without user input for this run the reply is unknown_ask.
 func (s *Stream) AnswerAsk(askID, action string, values map[string]any) wire.InputResponse {
 	if s.asker == nil {
@@ -434,23 +456,29 @@ func (s *Stream) OpenAsk() (string, bool) {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.cur == nil || k.cur.closed {
+	if k.cur == nil || k.cur.closed || k.cur.opening {
 		return "", false
 	}
 	return k.cur.id, true
 }
 
 // Park ends the turn after AskUser returned ErrParked: it emits
-// askClosed{parked} and done with reason awaiting_input.
+// askClosed{parked} (only when askID is this run's pending parked ask, so
+// never twice and never for an unknown id) and done with reason
+// awaiting_input.
 func (s *Stream) Park(askID string) {
+	owed := false
 	if k := s.asker; k != nil {
 		k.mu.Lock()
-		if k.parked == askID {
+		if askID != "" && k.parked == askID {
 			k.parked = ""
+			owed = true
 		}
 		k.mu.Unlock()
 	}
-	s.askClosed(askID, askClosedParked)
+	if owed {
+		s.askClosed(askID, askClosedParked)
+	}
 	s.DoneWithReason(wire.StopEndTurn, wire.ReasonAwaitingInput, nil)
 }
 

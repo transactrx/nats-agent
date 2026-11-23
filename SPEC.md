@@ -235,6 +235,12 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
 - `delegation` optional (v1.6): `{depth}`, how many agent-to-agent hops
   precede this turn. Absent = 0 (an entry call). An agent refuses a turn
   deeper than its limit with 400 / code 4003. See §13.
+- `userInput` and `inputs` optional (v1.7): the caller can show asks
+  (`{"supported": true}`) and answers parked asks. With `inputs`, an agent
+  that opted in (card `capabilities.userInput`) accepts an empty `content`
+  (an answer-only turn) when at least one input is valid. The ack then
+  carries `caps.inputSubject`, the per-run `trx.agent.<name>.input.<token>`
+  endpoint. See §14.
 
 **Authentication (v1.1):** requests to `chat`, `invoke`, `sessions*` carry the
 caller's Internal Delegation Token in NATS header `X-TRX-IDT`. An agent with
@@ -833,9 +839,12 @@ Two `data` kinds on the event stream (§5.3):
   the asking agent's name (relays may prepend their own, reading like a
   path).
 - `askClosed.status` is `answered`, `skipped`, `parked` or `superseded`
-  (the user sent a message instead of answering). Exactly one `askClosed`
-  follows every `ask`, whatever closed it, before the terminal event, so a
-  card never stays open.
+  (the user sent a message instead of answering). An agent sends one
+  `askClosed` per `ask` before the terminal event on a best-effort basis:
+  when the run ends while an ask is open (for example the handler gets
+  `ErrRunEnded`, or a terminal event races the close) none may follow.
+  Callers MUST therefore treat a terminal event as closing any ask still
+  open as `parked`, so a card never stays open.
 - Terminal `done` carries `reason: "awaiting_input"` (§12.5) when the turn
   ended because an ask was parked. Clients ignore unknown reasons.
 - Every event except `ping` counts as progress for idle cuts (§12.3).
@@ -848,7 +857,10 @@ The caller sends a NATS request to `caps.inputSubject`:
 { "runId": "run_01HZY...", "askId": "ask_...", "action": "submit", "values": { } }
 ```
 
-`action` is `submit` or `skip`. The reply is `{"accepted": true}` or
+`action` is `submit`, `skip`, or `supersede` (the user sent a message
+instead of answering: `values: {"text": "..."}`, non-empty; the ask closes
+as `superseded`, the agent's `AskUser` returns `ErrSuperseded` with the
+text). The reply is `{"accepted": true}` or
 `{"accepted": false, "reason": "...", "errors": { }}`:
 
 | `reason` | Meaning |
@@ -948,7 +960,15 @@ summary:
   `askClosed{parked}` and `done` with `awaiting_input`. Without it the
   library still closes the card before the terminal event.
 - `Stream.InterruptAsk(text)` closes the open ask as `superseded` (the user
-  typed instead of answering).
+  typed instead of answering); `supersede` on the input subject (§14.3) or
+  via `Stream.AnswerAsk` does the same.
+- While `AskOptions.OnOpen` runs the ask is "opening": `InterruptAsk`,
+  `OpenAsk` and answers ignore it (an answer gets `unknown_ask`) until
+  `OnOpen` returns.
+- `Park(askID)` emits `askClosed{parked}` only for the run's pending parked
+  ask (after `ErrParked`); it always ends the turn as `awaiting_input`.
+- `wire.AskEvent` / `wire.AskClosedEvent` and `wire.AskClosed*` decode the
+  two data kinds.
 - `Stream.AnswerAsk(askID, action, values)` answers the run's ask in
   process, with the same validation and reply as §14.3 (for a handler that
   routes answers itself).

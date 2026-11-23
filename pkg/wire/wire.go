@@ -277,10 +277,38 @@ const (
 	DataKindAskClosed = "askClosed"
 )
 
+// AskEvent (v1.7) is the payload of a data event of kind DataKindAsk. Ask is
+// the ask itself (pkg/ask.Ask), opaque to the wire.
+type AskEvent struct {
+	AskID  string          `json:"askId"`
+	WaitMs int64           `json:"waitMs"`
+	Origin string          `json:"origin"`
+	Ask    json.RawMessage `json:"ask"`
+}
+
+// AskClosedEvent (v1.7) is the payload of a data event of kind
+// DataKindAskClosed. Status is one of the AskClosed* values.
+type AskClosedEvent struct {
+	AskID  string `json:"askId"`
+	Status string `json:"status"`
+}
+
+// askClosed statuses (v1.7).
+const (
+	AskClosedAnswered   = "answered"
+	AskClosedSkipped    = "skipped"
+	AskClosedParked     = "parked"
+	AskClosedSuperseded = "superseded"
+)
+
 // Input actions (v1.7).
 const (
 	InputActionSubmit = "submit"
 	InputActionSkip   = "skip"
+	// InputActionSupersede: the user sent a message instead of answering;
+	// Values["text"] (non-empty string) carries it. The ask closes as
+	// superseded, like Stream.InterruptAsk.
+	InputActionSupersede = "supersede"
 )
 
 // Input rejection reasons (v1.7) carried by InputResponse.Reason.
@@ -299,7 +327,7 @@ const (
 type InputRequest struct {
 	RunID  string         `json:"runId"`
 	AskID  string         `json:"askId"`
-	Action string         `json:"action"` // InputActionSubmit or InputActionSkip
+	Action string         `json:"action"` // InputActionSubmit, InputActionSkip or InputActionSupersede
 	Values map[string]any `json:"values,omitempty"`
 }
 

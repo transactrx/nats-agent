@@ -138,7 +138,9 @@ case err == nil || errors.Is(err, agent.ErrSkipped): result := ans.ToolResult()
 
 // caller: opt in per run, answer live or in a later turn
 run, _ := c.ChatWith(ctx, "copayAssistant", req, agentclient.ChatOptions{UserInput: true})
-resp, err := run.Answer(ctx, askID, wire.InputActionSubmit, values) // ErrRunGone => parked
+resp, err := run.Answer(ctx, askID, wire.InputActionSubmit, values) // ErrRunGone => parked (on timeout it may have applied)
+// user typed instead: run.Answer(ctx, askID, wire.InputActionSupersede, map[string]any{"text": msg}) => agent gets ErrSuperseded
+// decode events with wire.AskEvent / wire.AskClosedEvent (status wire.AskClosed*)
 // next turn: agentclient.ChatOptions{Inputs: []wire.AskInput{{AskID: id, Action: "submit", Values: v, Ask: askJSON}}}
 ```
 

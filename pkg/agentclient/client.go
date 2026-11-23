@@ -53,9 +53,12 @@ var (
 	// ErrNoInputSubject: the run offers no input subject (the agent or the
 	// caller did not opt in to asks), so Answer has nowhere to go.
 	ErrNoInputSubject = errors.New("agentclient: run does not accept answers (no input subject)")
-	// ErrRunGone: the run is not live any more (no responders, or no reply
-	// in time), so the answer was not delivered. A parked ask is answered by
-	// the next ChatWith with ChatOptions.Inputs instead.
+	// ErrRunGone: the run is not live any more (no responders), or no reply
+	// came in time. With no responders the answer was not delivered; on a
+	// timeout it may still have been applied (the reply was lost), so the
+	// caller must not assume either outcome: rely on askClosed or the
+	// stored ask state. A parked ask is answered by the next ChatWith with
+	// ChatOptions.Inputs instead.
 	ErrRunGone = errors.New("agentclient: run is not live")
 	// ErrDelegationNotAllowed: the calling turn's agent is not an
 	// orchestrator, so it may not call other agents. Returned before
@@ -340,7 +343,8 @@ func (r *Run) RenewWithExpiry(ctx context.Context, idt string, expiresAt time.Ti
 var answerTimeout = 5 * time.Second
 
 // Answer delivers the user's answer to the live ask askID of this run
-// (action wire.InputActionSubmit or InputActionSkip; values for a submit).
+// (action wire.InputActionSubmit, InputActionSkip, or InputActionSupersede
+// with values {"text": ...}; values for a submit).
 // The reply says whether it was accepted; a refusal (Accepted false) is a
 // normal result carrying Reason (and Errors per field when invalid), not an
 // error. ErrNoInputSubject when the run offers no input subject (or one that
