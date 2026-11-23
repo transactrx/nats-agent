@@ -99,7 +99,7 @@ func ToolInputSchema() map[string]any {
 		"sections":    arr(obj([]string{"id"}, map[string]any{"id": str(""), "title": str(""), "collapsed": boolean("")})),
 		"fields":      map[string]any{"type": "array", "items": field, "description": fmt.Sprintf("Max %d; none only for mode confirm", MaxFields)},
 		"rules": arr(obj([]string{"type", "fields", "message"}, map[string]any{
-			"type":    enum("", RuleAfter, RuleNotBefore, RuleAtLeastOne, RuleEqual, RuleNotEqual),
+			"type":    enum("after: fields[1] later than fields[0], e.g. [start, end]; notBefore: fields[1] same or later; atLeastOne: any of fields set", RuleAfter, RuleNotBefore, RuleAtLeastOne, RuleEqual, RuleNotEqual),
 			"fields":  arr(map[string]any{"type": "string"}),
 			"message": str(""),
 		})),

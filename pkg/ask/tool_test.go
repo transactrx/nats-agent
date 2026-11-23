@@ -122,3 +122,13 @@ func TestSchemaOmitsEmptyDescriptions(t *testing.T) {
 	_ = json.Unmarshal(b, &m)
 	walk(m)
 }
+
+// The model must know the field order of after/notBefore rules.
+func TestToolInputSchemaRuleOrderDocumented(t *testing.T) {
+	rules := ToolInputSchema()["properties"].(map[string]any)["rules"].(map[string]any)
+	typ := rules["items"].(map[string]any)["properties"].(map[string]any)["type"].(map[string]any)
+	d, _ := typ["description"].(string)
+	if !strings.Contains(d, "fields[1]") || !strings.Contains(d, "[start, end]") {
+		t.Fatalf("rule type description must explain field order, got %q", d)
+	}
+}
