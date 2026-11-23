@@ -949,3 +949,6 @@ summary:
   library still closes the card before the terminal event.
 - `Stream.InterruptAsk(text)` closes the open ask as `superseded` (the user
   typed instead of answering).
+- `Stream.AnswerAsk(askID, action, values)` answers the run's ask in
+  process, with the same validation and reply as §14.3 (for a handler that
+  routes answers itself).

@@ -858,3 +858,39 @@ func TestAskUserWithOnOpenErrorAbandons(t *testing.T) {
 		}
 	}
 }
+
+// AnswerAsk is the in-process input path: same validation and outcome as a
+// request on caps.inputSubject, for a handler that relays answers itself.
+func TestStreamAnswerAsk(t *testing.T) {
+	streams := make(chan *Stream, 1)
+	results := make(chan askResult, 1)
+	a, _ := startAskAgent(t, askAgentOpts{userInput: true, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+		streams <- s
+		ans, err := s.AskUser(ctx, testAsk)
+		results <- askResult{ans, err}
+		return nil
+	}})
+	run := chatInput(t, a, true)
+	s := <-streams
+	p := payloadOf(t, nextKind(t, run, wire.DataKindAsk))
+	if r := s.AnswerAsk("ask_other", wire.InputActionSkip, nil); r.Reason != wire.InputReasonUnknownAsk {
+		t.Fatalf("other ask = %+v", r)
+	}
+	if r := s.AnswerAsk(p.AskID, wire.InputActionSubmit, map[string]any{"day": "nope"}); r.Accepted || r.Reason != wire.InputReasonInvalid || r.Errors["day"] == "" {
+		t.Fatalf("invalid = %+v", r)
+	}
+	if r := s.AnswerAsk(p.AskID, wire.InputActionSubmit, map[string]any{"day": "2026-11-22"}); !r.Accepted {
+		t.Fatalf("valid = %+v", r)
+	}
+	if r := s.AnswerAsk(p.AskID, wire.InputActionSkip, nil); r.Reason != wire.InputReasonClosed {
+		t.Fatalf("second = %+v", r)
+	}
+	if r := waitResult(t, results); r.err != nil || r.ans.Values["day"] != "2026-11-22" {
+		t.Fatalf("result = %+v, %v", r.ans, r.err)
+	}
+	drainRun(run)
+	var none Stream
+	if r := none.AnswerAsk(p.AskID, wire.InputActionSkip, nil); r.Reason != wire.InputReasonUnknownAsk {
+		t.Fatalf("no asker = %+v", r)
+	}
+}

@@ -410,6 +410,22 @@ func (s *Stream) InterruptAsk(text string) bool {
 	return true
 }
 
+// AnswerAsk answers this run's ask in process, exactly like an InputRequest
+// on caps.inputSubject (same validation, same first-wins rule, same reply).
+// For a handler that receives answers on its own route and hands them on.
+// Without user input for this run the reply is unknown_ask.
+func (s *Stream) AnswerAsk(askID, action string, values map[string]any) wire.InputResponse {
+	if s.asker == nil {
+		return refuse(wire.InputReasonUnknownAsk)
+	}
+	// Through JSON, like the subject path: values get the same encoding.
+	body, err := json.Marshal(wire.InputRequest{RunID: s.runID, AskID: askID, Action: action, Values: values})
+	if err != nil {
+		return refuse(wire.InputReasonInvalid)
+	}
+	return s.asker.apply(body)
+}
+
 // OpenAsk is the id of this run's open ask, if any.
 func (s *Stream) OpenAsk() (string, bool) {
 	k := s.asker
