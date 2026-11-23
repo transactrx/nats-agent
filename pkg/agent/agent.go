@@ -51,6 +51,11 @@ type Turn struct {
 	// (max of the request's delegation field and legacy metadata.hops).
 	DelegationDepth int
 
+	// ValidInputs (v1.7) are the request's inputs (answers to parked asks)
+	// that passed validation; bad ones are logged and dropped. Empty unless
+	// Config.UserInput.
+	ValidInputs []ValidInput
+
 	tok *tokenHolder // current token (Config.Renew); nil = Identity.IDT
 }
 
@@ -105,7 +110,14 @@ type Config struct {
 	Progress bool
 	// Renew (opt-in) advertises capability "renew": the agent accepts a
 	// fresh IDT mid-run. Default false = today's behavior.
-	Renew    bool
+	Renew bool
+	// UserInput (opt-in) advertises capability "userInput": handlers may ask
+	// the user mid-turn (Stream.AskUser) when the request also supports it.
+	// Default false = today's behavior.
+	UserInput bool
+	// AskWait is the live wait of an ask before it is parked. 0 = env
+	// AGENT_ASK_WAIT (a Go duration), else 5m.
+	AskWait  time.Duration
 	Metadata map[string]any
 
 	// Orchestrator (opt-in) lets this agent's handlers delegate to other
@@ -270,6 +282,7 @@ func New(cfg Config) (*Agent, error) {
 		cfg.OutputModalities = []string{"text"}
 	}
 	applyDelegationDefaults(&cfg)
+	cfg.AskWait = resolveAskWait(cfg.AskWait)
 	if cfg.Access == nil {
 		cfg.Access = accessFromEnv()
 	}
@@ -407,6 +420,7 @@ func (a *Agent) Card() wire.AgentCard {
 			UserContext: a.cfg.UserContext,
 			Progress:    a.cfg.Progress,
 			Renew:       a.cfg.Renew,
+			UserInput:   a.cfg.UserInput,
 		},
 		InputModalities:  a.cfg.InputModalities,
 		OutputModalities: a.cfg.OutputModalities,
@@ -463,6 +477,17 @@ func (a *Agent) Start() error {
 			// The service's queue subscription on trx.agent.<name>.> also
 			// receives renew requests; stay silent so the owning run's reply
 			// (or no reply once it ended) is the only answer.
+			Handler: func(msg *nats_service.NatsMessage) *nats_service.NatsServiceError {
+				fwd := nats_service.NewForwardedError(msg.Path)
+				return &fwd
+			},
+		})
+	}
+	if a.cfg.UserInput {
+		regs = append(regs, nats_service.EndpointRegistration{
+			Path:        "input.>",
+			Description: "Per-run input subjects (trx.agent.<name>.input.<random>) for answers to asks, announced in the chat ack. Answered only by the owning run's own subscription.",
+			// Same as renew.>: stay silent so only the owning run answers.
 			Handler: func(msg *nats_service.NatsMessage) *nats_service.NatsServiceError {
 				fwd := nats_service.NewForwardedError(msg.Path)
 				return &fwd
@@ -664,7 +689,11 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 		e := nats_service.NewValidationError("invalid request body", wire.CodeInvalidBody, err)
 		return nil, &e
 	}
-	if len(req.Message.Content) == 0 {
+	// Answer-only turns (no message text) need an opted-in agent and at
+	// least one valid input. The cheap gate runs here; the inputs are
+	// validated (patterns compiled) only after Authorize, below.
+	withInputs := a.cfg.UserInput && len(req.Inputs) > 0
+	if len(req.Message.Content) == 0 && !withInputs {
 		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
 		return nil, &e
 	}
@@ -694,7 +723,20 @@ func (a *Agent) parseTurn(msg *nats_service.NatsMessage, needStream bool) (*Turn
 	if id.Verified {
 		req.UserID = id.UserID
 	}
+	var inputs []ValidInput
+	if withInputs {
+		logger := msg.Logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		inputs = validateInputs(req.Inputs, logger)
+	}
+	if len(req.Message.Content) == 0 && len(inputs) == 0 {
+		e := nats_service.NewValidationError("message with content is required", wire.CodeMissingField, nil)
+		return nil, &e
+	}
 	return &Turn{
+		ValidInputs:     inputs,
 		ChatRequest:     req,
 		RunID:           "run_" + uuid.New().String(),
 		Logger:          msg.Logger,
@@ -731,10 +773,28 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 			renewSub = sub
 		}
 	}
+	// Private input subject (v1.7), only when both sides opted in.
+	var inputSub *nats.Subscription
+	var asker *asker
+	if a.cfg.UserInput && turn.UserInput != nil && turn.UserInput.Supported {
+		subject, k, sub, err := a.subscribeInput(turn)
+		if err != nil {
+			turn.Logger.Printf("run %s: user input unavailable: %v", turn.RunID, err)
+		} else {
+			if ack.Caps == nil {
+				ack.Caps = &wire.AckCaps{Progress: a.cfg.Progress}
+			}
+			ack.Caps.InputSubject = subject
+			inputSub, asker = sub, k
+		}
+	}
 	endRenew := func() {
 		turn.tok.close()
 		if renewSub != nil {
 			_ = renewSub.Unsubscribe()
+		}
+		if inputSub != nil {
+			_ = inputSub.Unsubscribe()
 		}
 	}
 	data, err := json.Marshal(ack)
@@ -753,6 +813,7 @@ func (a *Agent) handleChat(msg *nats_service.NatsMessage) *nats_service.NatsServ
 	a.mu.Unlock()
 
 	stream := newStream(a.nc, turn.StreamSubject, turn.RunID, turn.Logger, a.cfg.Progress)
+	stream.asker = asker
 
 	go func() {
 		defer func() {

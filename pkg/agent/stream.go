@@ -31,6 +31,8 @@ type Stream struct {
 	// progress is Config.Progress: Progress is a no-op when false.
 	progress bool
 	now      func() time.Time // clock for the progress throttle (test seam)
+	// asker is the run's ask state; nil = AskUser returns ErrUnsupported.
+	asker *asker
 
 	mu           sync.Mutex
 	seq          int
@@ -118,23 +120,27 @@ func (s *Stream) Status(text string) {
 
 // Done terminates the run successfully.
 func (s *Stream) Done(stopReason string, usage *wire.Usage) {
+	s.closeParked()
 	s.publish(wire.AgentEvent{Type: wire.EventDone, StopReason: stopReason, Usage: usage})
 }
 
 // DoneWithReason terminates the run successfully and says which limit
 // ended it (wire.Reason*).
 func (s *Stream) DoneWithReason(stopReason, reason string, usage *wire.Usage) {
+	s.closeParked()
 	s.publish(wire.AgentEvent{Type: wire.EventDone, StopReason: stopReason, Usage: usage, Reason: reason})
 }
 
 // Error terminates the run with a failure the client should surface.
 func (s *Stream) Error(message string, code int) {
+	s.closeParked()
 	s.publish(wire.AgentEvent{Type: wire.EventError, Error: message, ErrorStatus: code})
 }
 
 // ErrorWithReason terminates the run with a failure and says which limit
 // ended it (wire.Reason*).
 func (s *Stream) ErrorWithReason(message string, code int, reason string) {
+	s.closeParked()
 	s.publish(wire.AgentEvent{Type: wire.EventError, Error: message, ErrorStatus: code, Reason: reason})
 }
 

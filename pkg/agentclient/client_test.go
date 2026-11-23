@@ -1062,3 +1062,61 @@ func TestApplyDelegationDerivedCtx(t *testing.T) {
 		t.Fatalf("delegation = %+v, want depth 1", req.Delegation)
 	}
 }
+
+func TestValidInputSubject(t *testing.T) {
+	for subj, want := range map[string]bool{
+		"trx.agent.bot.input.abc_DEF-123": true,
+		"trx.agent.bot.input.":            false,
+		"trx.agent.bot.input.a.b":         false,
+		"trx.agent.bot.input.*":           false,
+		"trx.agent.bot.input.>":           false,
+		"trx.agent.other.input.abc":       false,
+		"trx.agent.bot.renew.abc":         false,
+		"trx.agent.bot.input.abc def":     false,
+	} {
+		if got := ValidInputSubject("bot", subj); got != want {
+			t.Errorf("ValidInputSubject(bot, %q) = %v, want %v", subj, got, want)
+		}
+	}
+	if !ValidInputSubject("bot_us", "trx.agent.bot.input.abc") {
+		t.Error("regional alias must map to the base name")
+	}
+	if ValidInputSubject("", "trx.agent..input.abc") {
+		t.Error("empty agent accepted")
+	}
+}
+
+func TestAnswerNoInputSubjectOrForeignSubject(t *testing.T) {
+	r := &Run{agent: "bot"}
+	if _, err := r.Answer(context.Background(), "a", "skip", nil); !errors.Is(err, ErrNoInputSubject) {
+		t.Fatalf("err = %v, want ErrNoInputSubject", err)
+	}
+	r.Caps.InputSubject = "trx.agent.evil.input.abc"
+	if _, err := r.Answer(context.Background(), "a", "skip", nil); !errors.Is(err, ErrNoInputSubject) {
+		t.Fatalf("foreign subject err = %v, want ErrNoInputSubject", err)
+	}
+}
+
+// A subscriber that never replies: Answer gives up after answerTimeout and
+// reports the run as gone.
+func TestAnswerTimeoutIsRunGone(t *testing.T) {
+	old := answerTimeout
+	answerTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { answerTimeout = old })
+	nc := testConn(t)
+	subj := "trx.agent.silentbot.input.tok"
+	sub, err := nc.Subscribe(subj, func(*nats.Msg) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	_ = nc.Flush()
+	r := &Run{agent: "silentbot", client: &Client{nc: nc}, Caps: wire.AckCaps{InputSubject: subj}}
+	start := time.Now()
+	if _, err := r.Answer(context.Background(), "a", wire.InputActionSkip, nil); !errors.Is(err, ErrRunGone) {
+		t.Fatalf("err = %v, want ErrRunGone", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("Answer took %s", time.Since(start))
+	}
+}
