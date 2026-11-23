@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.6"
+const ProtocolVersion = "1.7"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -133,6 +133,10 @@ type Capabilities struct {
 	// Renew (v1.5): the agent accepts a fresh IDT mid-run on the ack's
 	// caps.renewSubject.
 	Renew bool `json:"renew,omitempty"`
+	// UserInput (v1.7): the agent can ask the user for input mid-turn and
+	// accepts answers on the ack's caps.inputSubject. Used only when the
+	// request also sets userInput.supported.
+	UserInput bool `json:"userInput,omitempty"`
 }
 
 // AgentAccess maps an agent onto the identity model: an agent IS an
@@ -173,6 +177,27 @@ type ChatRequest struct {
 	// Delegation (v1.6) is how many agent-to-agent hops precede this turn.
 	// Absent = 0 (a top-level turn).
 	Delegation *Delegation `json:"delegation,omitempty"`
+	// UserInput (v1.7) says whether the caller can show the user an ask card.
+	// Absent = the agent must not ask.
+	UserInput *UserInputSupport `json:"userInput,omitempty"`
+	// Inputs (v1.7) carries answers to asks that were parked (the live wait
+	// expired); the agent resumes them before the model runs.
+	Inputs []AskInput `json:"inputs,omitempty"`
+}
+
+// UserInputSupport (v1.7) is the caller's declaration that it can render asks.
+type UserInputSupport struct {
+	Supported bool `json:"supported"`
+}
+
+// AskInput (v1.7) is the user's answer to one ask, delivered with a chat
+// request. Ask is the original ask payload (opaque to the wire), included so
+// the agent can validate and replay a parked ask.
+type AskInput struct {
+	AskID  string          `json:"askId"`
+	Action string          `json:"action"` // InputActionSubmit or InputActionSkip
+	Values map[string]any  `json:"values,omitempty"`
+	Ask    json.RawMessage `json:"ask,omitempty"`
 }
 
 // Delegation (v1.6) carries the agent-to-agent hop depth of a request.
@@ -189,6 +214,8 @@ type Budget struct {
 type AckCaps struct {
 	Progress     bool   `json:"progress,omitempty"`
 	RenewSubject string `json:"renewSubject,omitempty"` // where RenewRequest goes
+	// InputSubject (v1.7) is where InputRequest goes to answer a live ask.
+	InputSubject string `json:"inputSubject,omitempty"`
 }
 
 type ChatAck struct {
@@ -236,7 +263,81 @@ const (
 	// ReasonUnavailable: an operational stop, a service the turn needs was
 	// unavailable.
 	ReasonUnavailable = "unavailable"
+	// ReasonAwaitingInput (v1.7): the turn ended because the user did not
+	// answer an ask within the live wait; the ask is parked.
+	ReasonAwaitingInput = "awaiting_input"
 )
+
+// Data event kinds for user input (v1.7).
+const (
+	// DataKindAsk is a data event whose payload is the ask the user must answer.
+	DataKindAsk = "ask"
+	// DataKindAskClosed is a data event telling the caller an ask is no longer
+	// open (answered, skipped, parked or superseded).
+	DataKindAskClosed = "askClosed"
+)
+
+// AskEvent (v1.7) is the payload of a data event of kind DataKindAsk. Ask is
+// the ask itself (pkg/ask.Ask), opaque to the wire.
+type AskEvent struct {
+	AskID  string          `json:"askId"`
+	WaitMs int64           `json:"waitMs"`
+	Origin string          `json:"origin"`
+	Ask    json.RawMessage `json:"ask"`
+}
+
+// AskClosedEvent (v1.7) is the payload of a data event of kind
+// DataKindAskClosed. Status is one of the AskClosed* values.
+type AskClosedEvent struct {
+	AskID  string `json:"askId"`
+	Status string `json:"status"`
+}
+
+// askClosed statuses (v1.7).
+const (
+	AskClosedAnswered   = "answered"
+	AskClosedSkipped    = "skipped"
+	AskClosedParked     = "parked"
+	AskClosedSuperseded = "superseded"
+)
+
+// Input actions (v1.7).
+const (
+	InputActionSubmit = "submit"
+	InputActionSkip   = "skip"
+	// InputActionSupersede: the user sent a message instead of answering;
+	// Values["text"] (non-empty string) carries it. The ask closes as
+	// superseded, like Stream.InterruptAsk.
+	InputActionSupersede = "supersede"
+)
+
+// Input rejection reasons (v1.7) carried by InputResponse.Reason.
+const (
+	InputReasonUnknownAsk = "unknown_ask"
+	InputReasonClosed     = "closed"
+	InputReasonInvalid    = "invalid"
+	// InputReasonBusy is reserved: the v0.8 runtime never sends it. Answers
+	// to one ask are decided one at a time, so the loser of concurrent
+	// answers gets InputReasonClosed; one open ask per run is enforced by
+	// Stream.AskUser returning ErrBusy.
+	InputReasonBusy = "busy"
+)
+
+// InputRequest (v1.7) answers a live ask of a running turn.
+type InputRequest struct {
+	RunID  string         `json:"runId"`
+	AskID  string         `json:"askId"`
+	Action string         `json:"action"` // InputActionSubmit, InputActionSkip or InputActionSupersede
+	Values map[string]any `json:"values,omitempty"`
+}
+
+// InputResponse (v1.7) says whether the answer was accepted. Errors maps field
+// ids to messages when Reason is InputReasonInvalid.
+type InputResponse struct {
+	Accepted bool              `json:"accepted"`
+	Reason   string            `json:"reason,omitempty"`
+	Errors   map[string]string `json:"errors,omitempty"`
+}
 
 // DataKindProgress (v1.5) is the data event kind whose payload is a
 // ProgressPayload.

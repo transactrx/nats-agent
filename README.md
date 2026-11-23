@@ -121,6 +121,32 @@ along automatically; an agent refuses a turn deeper than
 `Config.MaxDelegationDepth` (default 1) with 400 / code 4003. Tools never
 call agents. See SPEC.md §13.
 
+### Asking the user (protocol 1.7)
+
+```go
+// agent: opt in, offer the tool + guidance to the model
+cfg := agent.Config{ /* ... */ UserInput: true } // AskWait / AGENT_ASK_WAIT, default 5m
+// tool: ask.ToolName, ask.ToolDescription(), ask.ToolInputSchema(); system prompt: ask.Guidance
+// when the model calls it: a, err := ask.ParseAsk(input)
+ans, err := stream.AskUser(ctx, a) // ctx = the run ctx
+// or stream.AskUserWith(ctx, a, agent.AskOptions{OnOpen: storeAsk}) to store it before the event
+switch {
+case errors.Is(err, agent.ErrParked): stream.Park(ans.AskID) // once; ends the turn: awaiting_input
+case err == nil || errors.Is(err, agent.ErrSkipped): result := ans.ToolResult()
+}
+// turn.ValidInputs = validated answers to earlier parked asks; ask.FormatForModel(a, in)
+
+// caller: opt in per run, answer live or in a later turn
+run, _ := c.ChatWith(ctx, "copayAssistant", req, agentclient.ChatOptions{UserInput: true})
+resp, err := run.Answer(ctx, askID, wire.InputActionSubmit, values) // ErrRunGone => parked (on timeout it may have applied)
+// user typed instead: run.Answer(ctx, askID, wire.InputActionSupersede, map[string]any{"text": msg}) => agent gets ErrSuperseded
+// decode events with wire.AskEvent / wire.AskClosedEvent (status wire.AskClosed*)
+// next turn: agentclient.ChatOptions{Inputs: []wire.AskInput{{AskID: id, Action: "submit", Values: v, Ask: askJSON}}}
+```
+
+`inputs` are caller-asserted: verify a resumed answer against your own record
+before any side effect. See SPEC.md §14.
+
 ### User context (protocol 1.3)
 
 Requests may carry `context` `{timeZone, userName, locale}` — display only,
