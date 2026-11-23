@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -293,6 +294,20 @@ func (k *asker) takeParked() string {
 // handler never calls Park, right before the terminal event); parked here
 // when ctx ends while the stream is still live.
 func (s *Stream) AskUser(ctx context.Context, a ask.Ask) (ask.Answer, error) {
+	return s.AskUserWith(ctx, a, AskOptions{})
+}
+
+// AskOptions tunes one AskUserWith call.
+type AskOptions struct {
+	// OnOpen runs once the ask has its id (after CheckAsk and the busy
+	// check), before the ask event goes out: e.g. to store the ask so an
+	// answer or a reload can find it. An error abandons the ask (no event,
+	// no askClosed, no open ask) and AskUserWith returns it wrapped.
+	OnOpen func(askID string) error
+}
+
+// AskUserWith is AskUser with options (see AskOptions).
+func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.Answer, error) {
 	k := s.asker
 	if k == nil {
 		return ask.Answer{}, ErrUnsupported
@@ -315,6 +330,16 @@ func (s *Stream) AskUser(ctx context.Context, a ask.Ask) (ask.Answer, error) {
 	}
 	k.cur = cur
 	k.mu.Unlock()
+	if o.OnOpen != nil {
+		if err := o.OnOpen(id); err != nil {
+			k.mu.Lock()
+			if k.cur == cur {
+				k.cur = nil
+			}
+			k.mu.Unlock()
+			return ask.Answer{}, fmt.Errorf("ask %s not opened: %w", id, err)
+		}
+	}
 
 	// From here InterruptAsk may close cur even before the ask event below
 	// goes out. Harmless: the event is followed at once by askClosed

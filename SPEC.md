@@ -941,6 +941,9 @@ summary:
   `ErrRunEnded`, or the ask's validation error. `ctx` MUST be the run
   context the handler received (or derived from it) so a cancelled or cut run
   stops the wait.
+- `Stream.AskUserWith(ctx, a, agent.AskOptions{OnOpen: fn})` calls `fn(askID)`
+  before the `ask` event (e.g. to store the ask); an error abandons the ask
+  (no event) and is returned wrapped.
 - After `ErrParked`, call `Stream.Park(askID)` once, right away: it emits
   `askClosed{parked}` and `done` with `awaiting_input`. Without it the
   library still closes the card before the terminal event.

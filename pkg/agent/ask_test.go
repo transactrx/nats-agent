@@ -780,3 +780,81 @@ func TestAskWaitResolution(t *testing.T) {
 		}
 	}
 }
+
+func TestAskUserWithOnOpenBeforeEvent(t *testing.T) {
+	opened := make(chan string, 1)
+	release := make(chan struct{})
+	results := make(chan askResult, 1)
+	a, _ := startAskAgent(t, askAgentOpts{userInput: true, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+		ans, err := s.AskUserWith(ctx, testAsk, AskOptions{OnOpen: func(id string) error {
+			opened <- id
+			<-release
+			return nil
+		}})
+		results <- askResult{ans, err}
+		return nil
+	}})
+	run := chatInput(t, a, true)
+	var id string
+	select {
+	case id = <-opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnOpen never called")
+	}
+	if !strings.HasPrefix(id, "ask_") {
+		t.Fatalf("OnOpen id = %q", id)
+	}
+	// While OnOpen runs, no ask event may be out.
+	select {
+	case ev := <-run.Events:
+		if ev.Type == wire.EventData && ev.Kind == wire.DataKindAsk {
+			t.Fatal("ask event emitted before OnOpen returned")
+		}
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	p := payloadOf(t, nextKind(t, run, wire.DataKindAsk))
+	if p.AskID != id {
+		t.Fatalf("event askId %q, OnOpen id %q", p.AskID, id)
+	}
+	answer(t, run, wire.InputRequest{AskID: id, Action: wire.InputActionSkip})
+	if r := waitResult(t, results); !errors.Is(r.err, ErrSkipped) {
+		t.Fatalf("err = %v", r.err)
+	}
+	drainRun(run)
+}
+
+func TestAskUserWithOnOpenErrorAbandons(t *testing.T) {
+	boom := errors.New("store down")
+	first := make(chan askResult, 1)
+	stillOpen := make(chan bool, 1)
+	results := make(chan askResult, 1)
+	a, _ := startAskAgent(t, askAgentOpts{userInput: true, handler: func(ctx context.Context, _ *Turn, s *Stream) error {
+		ans, err := s.AskUserWith(ctx, testAsk, AskOptions{OnOpen: func(string) error { return boom }})
+		first <- askResult{ans, err}
+		_, open := s.OpenAsk()
+		stillOpen <- open
+		ans, err = s.AskUser(ctx, testAsk)
+		results <- askResult{ans, err}
+		return nil
+	}})
+	run := chatInput(t, a, true)
+	r := waitResult(t, first)
+	if !errors.Is(r.err, boom) {
+		t.Fatalf("err = %v, want wrapped OnOpen error", r.err)
+	}
+	if <-stillOpen {
+		t.Fatal("abandoned ask still open")
+	}
+	p := payloadOf(t, nextKind(t, run, wire.DataKindAsk))
+	answer(t, run, wire.InputRequest{AskID: p.AskID, Action: wire.InputActionSkip})
+	if r := waitResult(t, results); !errors.Is(r.err, ErrSkipped) {
+		t.Fatalf("next ask err = %v", r.err)
+	}
+	evs := drainRun(run)
+	for _, ev := range evs {
+		if ev.Type == wire.EventData && ev.Kind == wire.DataKindAsk {
+			t.Fatalf("a second ask event: the abandoned ask was emitted")
+		}
+	}
+}

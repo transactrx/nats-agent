@@ -129,6 +129,7 @@ cfg := agent.Config{ /* ... */ UserInput: true } // AskWait / AGENT_ASK_WAIT, de
 // tool: ask.ToolName, ask.ToolDescription(), ask.ToolInputSchema(); system prompt: ask.Guidance
 // when the model calls it: a, err := ask.ParseAsk(input)
 ans, err := stream.AskUser(ctx, a) // ctx = the run ctx
+// or stream.AskUserWith(ctx, a, agent.AskOptions{OnOpen: storeAsk}) to store it before the event
 switch {
 case errors.Is(err, agent.ErrParked): stream.Park(ans.AskID) // once; ends the turn: awaiting_input
 case err == nil || errors.Is(err, agent.ErrSkipped): result := ans.ToolResult()
