@@ -23,6 +23,9 @@ const (
 	ModeCreate  = "create"
 	ModeEdit    = "edit"
 	ModeConfirm = "confirm"
+	// ModeNotice (v1.8): a card that only informs (title, description,
+	// read-only fields, links) with one button; it never waits for an answer.
+	ModeNotice = "notice"
 )
 
 // Field types.
@@ -39,7 +42,24 @@ const (
 	TypeDateRange = "dateRange"
 	TypeTags      = "tags"
 	TypeTable     = "table"
+	// TypePerson (v1.8): pick people; value {"id","label"} or a list of them.
+	TypePerson = "person"
+	// TypeLink (v1.8): a button to Href; display only, never in values.
+	TypeLink = "link"
+	// TypeHidden (v1.8): context the server carries through the form
+	// (ids, version tags). Never shown; its Value comes back unchanged in
+	// the answer's values (filled in when the client omits it).
+	TypeHidden = "hidden"
 )
+
+// Person scopes.
+const (
+	// ScopeAccount: people in the signed-in user's account (the default).
+	ScopeAccount = "account"
+)
+
+// MaxPersonLabel is the longest person label, in characters.
+const MaxPersonLabel = 200
 
 // Text formats.
 const (
@@ -128,6 +148,10 @@ type Field struct {
 	Columns        []Column         `json:"columns,omitempty"`
 	Rows           []map[string]any `json:"rows,omitempty"`
 	ShowIf         *Condition       `json:"showIf,omitempty"`
+	// Scope (person) is who can be picked: "" or "account".
+	Scope string `json:"scope,omitempty"`
+	// Href (link) is an app-relative path ("/...") or an https:// URL.
+	Href string `json:"href,omitempty"`
 }
 
 // Option is one choice.
@@ -175,7 +199,8 @@ func (f Field) allowOther() bool { return f.AllowOther == nil || *f.AllowOther }
 func validType(t string) bool {
 	switch t {
 	case TypeText, TypeLongText, TypeNumber, TypeChoice, TypeToggle, TypeCheckbox,
-		TypeDate, TypeTime, TypeDateTime, TypeDateRange, TypeTags, TypeTable:
+		TypeDate, TypeTime, TypeDateTime, TypeDateRange, TypeTags, TypeTable,
+		TypePerson, TypeLink, TypeHidden:
 		return true
 	}
 	return false

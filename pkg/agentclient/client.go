@@ -539,6 +539,10 @@ type ChatOptions struct {
 	// UserInput declares that the caller can show the user an ask form
 	// (sets ChatRequest.userInput). Without it agents never ask.
 	UserInput bool
+	// UserInputFeatures (v1.8) are the newer ask components this caller can
+	// draw (wire.Feature*, or wire.InputFeatures()); sent only with
+	// UserInput.
+	UserInputFeatures []string
 	// Inputs are answers to asks parked by an earlier turn, delivered with
 	// this one (ChatRequest.inputs). A chat may then carry no message text.
 	Inputs []wire.AskInput
@@ -560,6 +564,9 @@ func (c *Client) ChatWith(ctx context.Context, agent string, req wire.ChatReques
 	}
 	if o.UserInput {
 		req.UserInput = &wire.UserInputSupport{Supported: true}
+		if len(o.UserInputFeatures) > 0 {
+			req.UserInput.Features = append([]string(nil), o.UserInputFeatures...)
+		}
 	}
 	if len(o.Inputs) > 0 {
 		req.Inputs = o.Inputs
