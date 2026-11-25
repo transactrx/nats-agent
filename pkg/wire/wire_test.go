@@ -24,7 +24,7 @@ func TestAgentCardAccessRoundTrip(t *testing.T) {
 	if string(data) != "" && containsKey(data, "access") {
 		t.Fatalf("empty access must be omitted: %s", data)
 	}
-	if ProtocolVersion != "1.7" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
+	if ProtocolVersion != "1.8" || CodeForbidden != 4031 || HeaderIDT != "X-TRX-IDT" {
 		t.Fatalf("protocol constants: %s %d %s", ProtocolVersion, CodeForbidden, HeaderIDT)
 	}
 }
@@ -260,8 +260,47 @@ func TestAskInputRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProtocolVersion17(t *testing.T) {
-	if ProtocolVersion != "1.7" {
+func TestProtocolVersion18(t *testing.T) {
+	if ProtocolVersion != "1.8" {
 		t.Fatalf("ProtocolVersion = %s", ProtocolVersion)
+	}
+}
+
+func TestUserInputFeatures(t *testing.T) {
+	if FeaturePerson != "person" || FeatureLink != "link" || FeatureNotice != "notice" {
+		t.Fatal("feature names")
+	}
+	if len(AllInputFeatures) != 3 || AllInputFeatures[0] != FeaturePerson || AllInputFeatures[1] != FeatureLink || AllInputFeatures[2] != FeatureNotice {
+		t.Fatalf("AllInputFeatures = %v", AllInputFeatures)
+	}
+	var nilU *UserInputSupport
+	if nilU.Has(FeaturePerson) {
+		t.Fatal("nil Has")
+	}
+	u := &UserInputSupport{Supported: true, Features: []string{FeaturePerson}}
+	if !u.Has(FeaturePerson) || u.Has(FeatureLink) {
+		t.Fatal("Has")
+	}
+	if (&UserInputSupport{Features: []string{FeaturePerson}}).Has(FeaturePerson) {
+		t.Fatal("Has without Supported")
+	}
+	b, _ := json.Marshal(UserInputSupport{Supported: true})
+	if string(b) != `{"supported":true}` {
+		t.Fatalf("1.7 shape changed: %s", b)
+	}
+	b, _ = json.Marshal(UserInputSupport{Supported: true, Features: AllInputFeatures})
+	if string(b) != `{"supported":true,"features":["person","link","notice"]}` {
+		t.Fatalf("%s", b)
+	}
+}
+
+func TestInputFeaturesCopy(t *testing.T) {
+	a := InputFeatures()
+	if len(a) != 3 || a[0] != FeaturePerson || a[1] != FeatureLink || a[2] != FeatureNotice {
+		t.Fatalf("%v", a)
+	}
+	a[0] = "x"
+	if InputFeatures()[0] != FeaturePerson || AllInputFeatures[0] != FeaturePerson {
+		t.Fatal("InputFeatures must return a copy")
 	}
 }

@@ -27,15 +27,15 @@ func CheckAsk(a Ask) error {
 		return fmt.Errorf("description too long (max %d characters)", MaxDescription)
 	}
 	switch a.Mode {
-	case "", ModeAsk, ModeCreate, ModeEdit, ModeConfirm:
+	case "", ModeAsk, ModeCreate, ModeEdit, ModeConfirm, ModeNotice:
 	default:
-		return fmt.Errorf("invalid mode %q (use ask, create, edit or confirm)", a.Mode)
+		return fmt.Errorf("invalid mode %q (use ask, create, edit, confirm or notice)", a.Mode)
 	}
 	if len(a.Fields) > MaxFields {
 		return fmt.Errorf("too many fields: %d (max %d)", len(a.Fields), MaxFields)
 	}
-	if len(a.Fields) == 0 && a.Mode != ModeConfirm {
-		return fmt.Errorf("fields are required unless mode is confirm")
+	if len(a.Fields) == 0 && a.Mode != ModeConfirm && a.Mode != ModeNotice {
+		return fmt.Errorf("fields are required unless mode is confirm or notice")
 	}
 	if len(a.Sections) > MaxSections {
 		return fmt.Errorf("too many sections: %d (max %d)", len(a.Sections), MaxSections)
@@ -60,12 +60,132 @@ func CheckAsk(a Ask) error {
 		}
 		names[f.Name] = true
 	}
+	types := fieldTypes(a)
 	for _, f := range a.Fields {
 		if err := checkField(f, names, sections); err != nil {
 			return fmt.Errorf("field %q: %w", f.Name, err)
 		}
+		if f.ShowIf != nil && types[f.ShowIf.Field] == TypeLink {
+			return fmt.Errorf("field %q: showIf can't name link field %q (it has no value)", f.Name, f.ShowIf.Field)
+		}
 	}
-	return checkRules(a, fieldTypes(a))
+	if a.Mode == ModeNotice {
+		if err := checkNotice(a); err != nil {
+			return err
+		}
+	}
+	return checkRules(a, types)
+}
+
+// checkNotice: a notice only informs, so it holds only links and read-only
+// fields and no rules (nothing to fill in or check).
+func checkNotice(a Ask) error {
+	for _, f := range a.Fields {
+		if f.Type != TypeLink && f.Type != TypeHidden && !f.ReadOnly {
+			return fmt.Errorf("field %q: notice allows only link and read-only fields", f.Name)
+		}
+	}
+	if len(a.Rules) > 0 {
+		return fmt.Errorf("notice takes no rules")
+	}
+	return nil
+}
+
+// checkPersonLink checks the person and link attributes (v1.8).
+func checkPersonLink(f Field) error {
+	if f.Href != "" && f.Type != TypeLink {
+		return fmt.Errorf("href only applies to link fields")
+	}
+	if f.Scope != "" {
+		if f.Type != TypePerson {
+			return fmt.Errorf("scope only applies to person fields")
+		}
+		if f.Scope != ScopeAccount {
+			return fmt.Errorf("unknown scope %q (use account)", f.Scope)
+		}
+	}
+	switch f.Type {
+	case TypeLink:
+		if f.Label == "" {
+			return fmt.Errorf("link needs a label (the button text)")
+		}
+		if f.Href == "" {
+			return fmt.Errorf("link needs an href")
+		}
+		if !validHref(f.Href) {
+			return fmt.Errorf("invalid href %q: use an app path starting with / (not //) or an https:// URL", f.Href)
+		}
+		if f.Required {
+			return fmt.Errorf("link can't be required")
+		}
+		if f.Value != nil || f.Suggested != nil {
+			return fmt.Errorf("link takes no value or suggested")
+		}
+	case TypePerson:
+		if err := checkOptionList(f); err != nil {
+			return err
+		}
+	case TypeHidden:
+		return checkHidden(f)
+	}
+	return nil
+}
+
+// checkHidden: a hidden field carries a JSON value (text, number, bool, or a
+// list/object of those) and nothing meant for display or input.
+func checkHidden(f Field) error {
+	switch {
+	case f.Value == nil:
+		return fmt.Errorf("hidden needs a value")
+	case f.Label != "":
+		return fmt.Errorf("hidden takes no label")
+	case f.Help != "":
+		return fmt.Errorf("hidden takes no help")
+	case f.Required:
+		return fmt.Errorf("hidden can't be required")
+	case f.Suggested != nil:
+		return fmt.Errorf("hidden takes no suggested")
+	case len(f.Options) > 0:
+		return fmt.Errorf("hidden takes no options")
+	case f.ShowIf != nil:
+		// a hidden value dropped by showIf would lose the server's context
+		return fmt.Errorf("hidden can't have showIf")
+	case f.ReadOnly:
+		return fmt.Errorf("hidden takes no readOnly")
+	case f.Section != "":
+		return fmt.Errorf("hidden takes no section")
+	case f.Placeholder != "":
+		return fmt.Errorf("hidden takes no placeholder")
+	}
+	b, err := json.Marshal(f.Value)
+	var v any
+	if err != nil || json.Unmarshal(b, &v) != nil || !plainJSON(v) {
+		return fmt.Errorf("hidden value must be text, a number, true/false, or a list/object of those")
+	}
+	return nil
+}
+
+// plainJSON: decoded JSON with no null anywhere.
+func plainJSON(v any) bool {
+	switch t := v.(type) {
+	case string, float64, bool:
+		return true
+	case []any:
+		for _, x := range t {
+			if !plainJSON(x) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for _, x := range t {
+			if !plainJSON(x) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func fieldTypes(a Ask) map[string]string {
@@ -79,6 +199,9 @@ func fieldTypes(a Ask) map[string]string {
 func checkField(f Field, names, sections map[string]bool) error {
 	if !validType(f.Type) {
 		return fmt.Errorf("unknown type %q", f.Type)
+	}
+	if err := checkPersonLink(f); err != nil {
+		return err
 	}
 	if f.Section != "" && !sections[f.Section] {
 		return fmt.Errorf("unknown section %q", f.Section)
@@ -156,8 +279,12 @@ func checkField(f Field, names, sections map[string]bool) error {
 		name string
 		v    any
 	}{{"value", f.Value}, {"suggested", f.Suggested}} {
-		if isEmpty(p.v) {
+		if isEmpty(p.v) || f.Type == TypeHidden {
 			continue
+		}
+		if f.Type == TypePerson {
+			// a prefill may name ids only; labels then come from options.
+			p.v = personPrefill(f, p.v)
 		}
 		if f.Type == TypeChoice {
 			// membership is checked in checkChoice (free text is fine when
@@ -246,21 +373,15 @@ func checkChoice(f Field) error {
 	if len(f.Options) == 0 {
 		return fmt.Errorf("choice needs options")
 	}
-	if len(f.Options) > MaxOptions {
-		return fmt.Errorf("too many options: %d (max %d)", len(f.Options), MaxOptions)
-	}
-	seen := map[string]bool{}
-	for _, o := range f.Options {
-		if o.Value == "" {
-			return fmt.Errorf("option value is required")
-		}
-		if seen[o.Value] {
-			return fmt.Errorf("duplicate option value %q", o.Value)
-		}
-		seen[o.Value] = true
+	if err := checkOptionList(f); err != nil {
+		return err
 	}
 	if f.Suggested == nil || f.allowOther() {
 		return nil
+	}
+	seen := map[string]bool{}
+	for _, o := range f.Options {
+		seen[o.Value] = true
 	}
 	var sugg []any
 	if arr, ok := f.Suggested.([]any); ok {
@@ -273,6 +394,24 @@ func checkChoice(f Field) error {
 		if !seen[str] {
 			return fmt.Errorf("suggested %q is not among the options", fmt.Sprint(s))
 		}
+	}
+	return nil
+}
+
+// checkOptionList: at most MaxOptions, each with a unique non-empty value.
+func checkOptionList(f Field) error {
+	if len(f.Options) > MaxOptions {
+		return fmt.Errorf("too many options: %d (max %d)", len(f.Options), MaxOptions)
+	}
+	seen := map[string]bool{}
+	for _, o := range f.Options {
+		if o.Value == "" {
+			return fmt.Errorf("option value is required")
+		}
+		if seen[o.Value] {
+			return fmt.Errorf("duplicate option value %q", o.Value)
+		}
+		seen[o.Value] = true
 	}
 	return nil
 }
@@ -295,6 +434,12 @@ func checkRules(a Ask, types map[string]string) error {
 		for _, f := range r.Fields {
 			if _, ok := types[f]; !ok {
 				return fmt.Errorf("rule %d: unknown field %q", n, f)
+			}
+			if types[f] == TypeLink {
+				return fmt.Errorf("rule %d: link field %q has no value", n, f)
+			}
+			if types[f] == TypeHidden {
+				return fmt.Errorf("rule %d: hidden field %q has no user value", n, f)
 			}
 			if r.Type == RuleAfter || r.Type == RuleNotBefore {
 				switch types[f] {

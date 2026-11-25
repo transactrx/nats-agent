@@ -121,7 +121,7 @@ along automatically; an agent refuses a turn deeper than
 `Config.MaxDelegationDepth` (default 1) with 400 / code 4003. Tools never
 call agents. See SPEC.md §13.
 
-### Asking the user (protocol 1.7)
+### Asking the user (protocol 1.7, components 1.8)
 
 ```go
 // agent: opt in, offer the tool + guidance to the model
@@ -138,6 +138,8 @@ case err == nil || errors.Is(err, agent.ErrSkipped): result := ans.ToolResult()
 
 // caller: opt in per run, answer live or in a later turn
 run, _ := c.ChatWith(ctx, "copayAssistant", req, agentclient.ChatOptions{UserInput: true})
+// 1.8: also draw person/link fields and notice mode (else AskUser on such asks => ErrUnsupported)
+// agentclient.ChatOptions{UserInput: true, UserInputFeatures: wire.InputFeatures()}
 resp, err := run.Answer(ctx, askID, wire.InputActionSubmit, values) // ErrRunGone => parked (on timeout it may have applied)
 // user typed instead: run.Answer(ctx, askID, wire.InputActionSupersede, map[string]any{"text": msg}) => agent gets ErrSuperseded
 // decode events with wire.AskEvent / wire.AskClosedEvent (status wire.AskClosed*)
@@ -146,6 +148,13 @@ resp, err := run.Answer(ctx, askID, wire.InputActionSubmit, values) // ErrRunGon
 
 `inputs` are caller-asserted: verify a resumed answer against your own record
 before any side effect. See SPEC.md §14.
+
+1.8 components (SPEC.md §14.9): `person` field (answer `{"id","label"}` or a
+list; read with `ask.PersonValues`; re-check ids, labels are display only),
+`link` field (`href` = `/app/path` or `https://…`; never in values) and
+`notice` mode (informs only; `AskUser` emits `ask` + `askClosed{answered}`
+and returns at once). `hidden` field: server context (ids) never shown, always back in
+`values` unchanged (filled in when a client omits it); not feature-gated.
 
 ### User context (protocol 1.3)
 

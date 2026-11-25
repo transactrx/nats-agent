@@ -40,11 +40,11 @@ func BuildAnswer(a Ask, askID string, values map[string]any) Answer {
 	ans := Answer{AskID: askID, Status: StatusSubmitted, Values: norm, Display: map[string]string{}}
 	for _, f := range a.Fields {
 		v, ok := norm[f.Name]
-		if !ok {
+		if !ok || f.Type == TypeHidden { // hidden: in Values only
 			continue
 		}
 		ans.Display[f.Name] = displayValue(f, v)
-		if a.Mode == ModeEdit && !same(v, f.Value) {
+		if a.Mode == ModeEdit && !sameValue(f, v, f.Value) {
 			ans.Changed = append(ans.Changed, f.Name)
 		}
 	}
@@ -132,6 +132,8 @@ func displayValue(f Field, v any) string {
 			out = append(out, displayOne(f, x))
 		}
 		return joinOrNone(out)
+	case TypePerson:
+		return personDisplay(f, v)
 	case TypeTags:
 		var out []string
 		for _, x := range list(v) {
