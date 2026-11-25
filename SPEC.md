@@ -1048,6 +1048,14 @@ the form (item ids, version tags) without showing it.
   to the model (`FormatForModel`). It is always present in `values`. Rules
   can't name it ("hidden field has no user value"); another field's `showIf`
   may, and it reads the ask's `value` even when the client omits it.
+- Trust: a hidden value is exactly as trustworthy as the ask it came from.
+  On a live answer the agent built the ask itself. On a resumed input
+  (`ChatRequest.inputs`) the ask JSON comes from the **caller**: the agent
+  library checks the answer against that copy, not against one it kept. A
+  caller that stores asks server side and sends its own stored copy (never
+  one from the browser) keeps the values intact; even then, an agent MUST
+  re-check hidden ids against live state before acting (item still there,
+  still the user's, unchanged), never treat them as proof.
 
 Go: `ask.TypePerson`, `ask.TypeLink`, `ask.TypeHidden`, `ask.ModeNotice`, `ask.ScopeAccount`,
 `Field.Scope`, `Field.Href`, `ask.Person`, `ask.PersonValues(v)`;

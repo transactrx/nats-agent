@@ -70,6 +70,11 @@ func resolveAskWait(cfg time.Duration) time.Duration {
 
 // ValidInput is one ChatRequest.inputs entry that passed validation: the
 // original ask and the answer built from it.
+//
+// The ask is the caller's copy (validated against itself, not against one
+// this agent kept), so its hidden values are only as trustworthy as the
+// caller: re-check them against live state before acting, never treat them
+// as proof of what the agent showed.
 type ValidInput struct {
 	wire.AskInput
 	Ask    ask.Ask
