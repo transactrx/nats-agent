@@ -8,7 +8,7 @@ package wire
 import "encoding/json"
 
 // ProtocolVersion is the version of the agent protocol this library speaks.
-const ProtocolVersion = "1.7"
+const ProtocolVersion = "1.8"
 
 // Subject layout. Agents own <AgentPrefix>.<name>.>, tools own
 // <ToolPrefix>.<name>.>.
@@ -188,6 +188,42 @@ type ChatRequest struct {
 // UserInputSupport (v1.7) is the caller's declaration that it can render asks.
 type UserInputSupport struct {
 	Supported bool `json:"supported"`
+	// Features (v1.8) lists the newer ask components the caller can draw
+	// (Feature* values). An ask that needs a feature the caller did not
+	// list is not shown (the agent's AskUser returns ErrUnsupported).
+	Features []string `json:"features,omitempty"`
+}
+
+// Ask features a caller can draw (v1.8, UserInputSupport.Features).
+const (
+	// FeaturePerson: the person field (type "person").
+	FeaturePerson = "person"
+	// FeatureLink: the link field (type "link").
+	FeatureLink = "link"
+	// FeatureNotice: the notice mode (mode "notice").
+	FeatureNotice = "notice"
+)
+
+// AllInputFeatures lists every Feature* value, for callers that draw them
+// all. Do not modify; prefer InputFeatures(), which returns a copy.
+var AllInputFeatures = []string{FeaturePerson, FeatureLink, FeatureNotice}
+
+// InputFeatures returns a fresh copy of every Feature* value.
+func InputFeatures() []string {
+	return []string{FeaturePerson, FeatureLink, FeatureNotice}
+}
+
+// Has reports whether the caller can show asks and listed feature. Nil-safe.
+func (u *UserInputSupport) Has(feature string) bool {
+	if u == nil || !u.Supported {
+		return false
+	}
+	for _, f := range u.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // AskInput (v1.7) is the user's answer to one ask, delivered with a chat

@@ -152,6 +152,8 @@ type asker struct {
 	origin string
 	wait   time.Duration
 	logger *log.Logger
+	// support is the caller's ChatRequest.userInput (features, v1.8).
+	support *wire.UserInputSupport
 
 	mu     sync.Mutex
 	cur    *openAsk
@@ -190,7 +192,7 @@ func (a *Agent) subscribeInput(turn *Turn) (string, *asker, *nats.Subscription, 
 	if logger == nil {
 		logger = log.Default()
 	}
-	k := &asker{runID: turn.RunID, origin: a.cfg.Name, wait: a.cfg.AskWait, logger: logger, closed: map[string]bool{}}
+	k := &asker{runID: turn.RunID, origin: a.cfg.Name, wait: a.cfg.AskWait, logger: logger, closed: map[string]bool{}, support: turn.UserInput}
 	sub, err := a.nc.Subscribe(subject, func(m *nats.Msg) {
 		resp := k.apply(m.Data)
 		if m.Reply == "" {
@@ -303,7 +305,9 @@ func (k *asker) takeParked() string {
 }
 
 // AskUser shows the user a form and waits for the answer. It returns
-//   - ErrUnsupported at once when the run cannot ask (no event);
+//   - ErrUnsupported at once when the run cannot ask, or the ask uses a
+//     component (person, link, notice) the caller did not list in
+//     userInput.features (no event);
 //   - the CheckAsk error when the ask is malformed (no event): report it to
 //     the model as a tool error;
 //   - ErrBusy when another ask of this run is open;
@@ -319,6 +323,8 @@ func (k *asker) takeParked() string {
 //
 // The ask goes out as data/ask {askId, waitMs, origin, ask}. Every close
 // emits data/askClosed {askId, status}, so a card never stays open: answered,
+// (a notice: right after the ask event, with waitMs 0 and an empty
+// submitted Answer, no wait and no park),
 // skipped and superseded here; parked by Park after ErrParked (or, if the
 // handler never calls Park, right before the terminal event); parked here
 // when ctx ends while the stream is still live.
@@ -347,6 +353,12 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 	if err := ask.CheckAsk(a); err != nil {
 		return ask.Answer{}, err
 	}
+	for _, f := range neededFeatures(a) {
+		if !k.support.Has(f) {
+			return ask.Answer{}, fmt.Errorf("%w: the caller cannot show %s", ErrUnsupported, f)
+		}
+	}
+	notice := a.Mode == ask.ModeNotice
 	id, err := newAskID()
 	if err != nil {
 		return ask.Answer{}, err
@@ -378,9 +390,21 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 	// {superseded}, and the caller sees an ask that opened and closed.
 	// An earlier expired ask the handler did not Park is closed first.
 	s.closeParked()
+	raw, _ := json.Marshal(a) // CheckAsk passed: plain data, marshals
+	if notice {
+		// A notice informs only: it closes as answered at once. An
+		// InterruptAsk that won the race closes it instead.
+		s.Data(wire.DataKindAsk, wire.AskEvent{AskID: id, WaitMs: 0, Origin: k.origin, Ask: raw})
+		if k.claim(cur, false) {
+			s.askClosed(id, askClosedAnswered)
+			return ask.Answer{AskID: id, Status: ask.StatusSubmitted}, nil
+		}
+		out := <-cur.done
+		s.askClosed(id, out.status)
+		return out.ans, out.err
+	}
 	timer := time.NewTimer(k.wait)
 	defer timer.Stop()
-	raw, _ := json.Marshal(a) // CheckAsk passed: plain data, marshals
 	s.Data(wire.DataKindAsk, wire.AskEvent{AskID: id, WaitMs: k.wait.Milliseconds(), Origin: k.origin, Ask: raw})
 
 	var out askOutcome
@@ -407,6 +431,30 @@ func (s *Stream) AskUserWith(ctx context.Context, a ask.Ask, o AskOptions) (ask.
 	}
 	s.askClosed(id, out.status)
 	return out.ans, out.err
+}
+
+// neededFeatures lists the wire features an ask uses (v1.8).
+func neededFeatures(a ask.Ask) []string {
+	var out []string
+	has := map[string]bool{}
+	add := func(f string) {
+		if !has[f] {
+			has[f] = true
+			out = append(out, f)
+		}
+	}
+	if a.Mode == ask.ModeNotice {
+		add(wire.FeatureNotice)
+	}
+	for _, f := range a.Fields {
+		switch f.Type {
+		case ask.TypePerson:
+			add(wire.FeaturePerson)
+		case ask.TypeLink:
+			add(wire.FeatureLink)
+		}
+	}
+	return out
 }
 
 func (s *Stream) askClosed(askID, status string) {

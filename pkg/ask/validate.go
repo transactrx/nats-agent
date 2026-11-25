@@ -8,13 +8,19 @@ import (
 
 // Visible reports whether f is shown given the current values. A field with
 // no showIf is always visible. The condition reads the raw value of the field
-// it names (it does not chain through that field's own visibility).
+// it names (it does not chain through that field's own visibility); a
+// hidden field reads as the ask's value, sent back or not.
 func Visible(a Ask, values map[string]any, f Field) bool {
 	c := f.ShowIf
 	if c == nil {
 		return true
 	}
 	got := values[c.Field]
+	for _, h := range a.Fields {
+		if h.Name == c.Field && h.Type == TypeHidden {
+			got = h.Value // a hidden field always holds the ask's value
+		}
+	}
 	switch c.Op {
 	case OpEq:
 		return same(got, c.Value)
@@ -36,18 +42,27 @@ func Visible(a Ask, values map[string]any, f Field) bool {
 	return true
 }
 
-// Normalize returns the values to hand to the model: hidden fields are
-// dropped, read-only fields are forced back to their value, and keys that
-// name no field are dropped. The input map is not modified.
+// Normalize returns the values to hand to the model: hidden fields are set
+// to the ask's value (whatever was sent back), read-only fields are forced
+// back to their value (a person
+// prefill given as ids becomes {"id","label"} objects), link fields and
+// keys that name no field are dropped. The input map is not modified.
 func Normalize(a Ask, values map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, f := range a.Fields {
-		if !Visible(a, values, f) {
+		if f.Type == TypeLink || !Visible(a, values, f) {
+			continue
+		}
+		if f.Type == TypeHidden {
+			out[f.Name] = f.Value // always the ask's value, sent back or not
 			continue
 		}
 		if f.ReadOnly {
 			if f.Value != nil {
 				out[f.Name] = f.Value
+				if f.Type == TypePerson {
+					out[f.Name] = personPrefill(f, f.Value)
+				}
 			}
 			continue
 		}
@@ -60,21 +75,33 @@ func Normalize(a Ask, values map[string]any) map[string]any {
 
 // Validate checks the submitted values against the ask and returns one error
 // per failing field (in field order), then rule errors with Field "".
-// Hidden fields are ignored; read-only fields must equal their value.
+// Hidden fields and links are ignored; read-only fields must equal their
+// value.
 func Validate(a Ask, values map[string]any) []FieldError {
 	var errs []FieldError
 	live := map[string]any{}
 	for _, f := range a.Fields {
-		if !Visible(a, values, f) {
+		if f.Type == TypeLink || !Visible(a, values, f) {
 			continue
 		}
 		v, present := values[f.Name]
-		if f.ReadOnly {
+		if f.Type == TypeHidden {
+			// missing = the ask's value (Normalize fills it in)
 			if present && !same(v, f.Value) {
+				errs = append(errs, FieldError{f.Name, f.label() + " can't be changed"})
+			}
+			live[f.Name] = f.Value
+			continue
+		}
+		if f.ReadOnly {
+			if present && !sameValue(f, v, f.Value) {
 				errs = append(errs, FieldError{f.Name, f.label() + " can't be changed"})
 			}
 			if f.Value != nil {
 				live[f.Name] = f.Value
+				if f.Type == TypePerson {
+					live[f.Name] = personPrefill(f, f.Value) // {id,label}, as Normalize
+				}
 			}
 			continue
 		}
@@ -120,6 +147,8 @@ func checkValue(f Field, v any) string {
 		return checkTags(f, v)
 	case TypeTable:
 		return checkTable(f, v)
+	case TypePerson:
+		return checkPerson(f, v)
 	}
 	return ""
 }
@@ -154,11 +183,16 @@ func ruleHolds(r Rule, live map[string]any, types map[string]string) bool {
 	if isEmpty(x) || isEmpty(y) {
 		return true // nothing to compare; required handles absence
 	}
+	eq := same
+	if types[r.Fields[0]] == TypePerson && types[r.Fields[1]] == TypePerson {
+		// people match by id; labels are display only
+		eq = func(x, y any) bool { return samePeople(Field{Type: TypePerson}, x, y) }
+	}
 	switch r.Type {
 	case RuleEqual:
-		return same(x, y)
+		return eq(x, y)
 	case RuleNotEqual:
-		return !same(x, y)
+		return !eq(x, y)
 	}
 	c, ok := compare(types[r.Fields[0]], x, y)
 	if !ok {

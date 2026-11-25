@@ -181,7 +181,7 @@
    ]
   },
   "values": {
-   "name2": "ééé"
+   "name2": "\u00e9\u00e9\u00e9"
   },
   "errors": {}
  },
@@ -3018,5 +3018,1050 @@
   },
   "values": {},
   "errors": {}
+ },
+ {
+  "name": "person single ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person label optional",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person scope account ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "scope": "account"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person single given a list",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    }
+   ]
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person single given text id",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": "u1"
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person empty id",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "",
+    "label": "Ann"
+   }
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person missing id",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "label": "Ann"
+   }
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person id not text",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": 7,
+    "label": "Ann"
+   }
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person label not text",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": 7
+   }
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person extra key",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann",
+    "email": "a@x.com"
+   }
+  },
+  "errors": {
+   "p": "Person must be a person"
+  }
+ },
+ {
+  "name": "person label 200 ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person label too long",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person"
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   }
+  },
+  "errors": {
+   "p": "Person has a name longer than 200 characters"
+  }
+ },
+ {
+  "name": "person required missing",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "required": true
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "p": "Person is required"
+  }
+ },
+ {
+  "name": "person multiple ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    },
+    {
+     "id": "u2",
+     "label": "Bo"
+    }
+   ]
+  },
+  "errors": {}
+ },
+ {
+  "name": "person multiple given object",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {
+   "p": "Person must be a list of people"
+  }
+ },
+ {
+  "name": "person multiple bad item",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    },
+    "u2"
+   ]
+  },
+  "errors": {
+   "p": "Person must be a list of people"
+  }
+ },
+ {
+  "name": "person multiple duplicate",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    },
+    {
+     "id": "u1",
+     "label": "Ann B"
+    }
+   ]
+  },
+  "errors": {
+   "p": "Person lists the same person twice"
+  }
+ },
+ {
+  "name": "person multiple required empty",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true,
+     "required": true
+    }
+   ]
+  },
+  "values": {
+   "p": []
+  },
+  "errors": {
+   "p": "Person is required"
+  }
+ },
+ {
+  "name": "person minItems",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true,
+     "minItems": 2
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    }
+   ]
+  },
+  "errors": {
+   "p": "Person needs at least 2 items"
+  }
+ },
+ {
+  "name": "person maxItems",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "multiple": true,
+     "maxItems": 1
+    }
+   ]
+  },
+  "values": {
+   "p": [
+    {
+     "id": "u1",
+     "label": "Ann"
+    },
+    {
+     "id": "u2",
+     "label": "Bo"
+    }
+   ]
+  },
+  "errors": {
+   "p": "Person allows at most 1 items"
+  }
+ },
+ {
+  "name": "person readOnly unchanged",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "readOnly": true,
+     "value": {
+      "id": "u1",
+      "label": "Ann"
+     }
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person readOnly changed",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "readOnly": true,
+     "value": {
+      "id": "u1",
+      "label": "Ann"
+     }
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u2",
+    "label": "Bo"
+   }
+  },
+  "errors": {
+   "p": "Person can't be changed"
+  }
+ },
+ {
+  "name": "person prefill id from options ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "value": "u1",
+     "options": [
+      {
+       "value": "u1",
+       "label": "Ann",
+       "description": "ann@x.com"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "link ignored in values",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "who",
+     "label": "Who",
+     "type": "text",
+     "required": true
+    },
+    {
+     "name": "open",
+     "label": "Open folder",
+     "type": "link",
+     "href": "/files"
+    }
+   ]
+  },
+  "values": {
+   "who": "x",
+   "open": "clicked"
+  },
+  "errors": {}
+ },
+ {
+  "name": "link https href ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "who",
+     "label": "Who",
+     "type": "text"
+    },
+    {
+     "name": "docs",
+     "label": "Docs",
+     "type": "link",
+     "href": "https://example.com/docs",
+     "help": "Opens in a new tab"
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "link does not satisfy sibling required",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "who",
+     "label": "Who",
+     "type": "text",
+     "required": true
+    },
+    {
+     "name": "open",
+     "label": "Open folder",
+     "type": "link",
+     "href": "/files"
+    }
+   ]
+  },
+  "values": {
+   "open": "clicked"
+  },
+  "errors": {
+   "who": "Who is required"
+  }
+ },
+ {
+  "name": "notice with links and read-only fields",
+  "ask": {
+   "title": "T",
+   "mode": "notice",
+   "submitLabel": "OK",
+   "fields": [
+    {
+     "name": "connect",
+     "label": "Connect OneDrive",
+     "type": "link",
+     "href": "/settings/onedrive"
+    },
+    {
+     "name": "acct",
+     "label": "Account",
+     "type": "text",
+     "readOnly": true,
+     "value": "A1"
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "notice with no fields",
+  "ask": {
+   "title": "T",
+   "mode": "notice"
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "notice read-only changed",
+  "ask": {
+   "title": "T",
+   "mode": "notice",
+   "fields": [
+    {
+     "name": "acct",
+     "label": "Account",
+     "type": "text",
+     "readOnly": true,
+     "value": "A1"
+    }
+   ]
+  },
+  "values": {
+   "acct": "B2"
+  },
+  "errors": {
+   "acct": "Account can't be changed"
+  }
+ },
+ {
+  "name": "readOnly id prefill, object echoed",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "readOnly": true,
+     "value": "u1",
+     "options": [
+      {
+       "value": "u1",
+       "label": "Ann",
+       "description": "ann@x.com"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "edit mode id prefill unchanged",
+  "ask": {
+   "title": "T",
+   "mode": "edit",
+   "fields": [
+    {
+     "name": "p",
+     "label": "Person",
+     "type": "person",
+     "value": "u1",
+     "options": [
+      {
+       "value": "u1",
+       "label": "Ann",
+       "description": "ann@x.com"
+      }
+     ]
+    }
+   ]
+  },
+  "values": {
+   "p": {
+    "id": "u1",
+    "label": "Ann"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "hidden echoed unchanged",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "fileId",
+     "type": "hidden",
+     "value": "f_123"
+    },
+    {
+     "name": "ctx",
+     "type": "hidden",
+     "value": {
+      "version": 3,
+      "tags": [
+       "a",
+       true
+      ]
+     }
+    },
+    {
+     "name": "note",
+     "label": "Note",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "fileId": "f_123",
+   "ctx": {
+    "tags": [
+     "a",
+     true
+    ],
+    "version": 3
+   },
+   "note": "x"
+  },
+  "errors": {}
+ },
+ {
+  "name": "hidden omitted is filled",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "fileId",
+     "type": "hidden",
+     "value": "f_123"
+    },
+    {
+     "name": "ctx",
+     "type": "hidden",
+     "value": {
+      "version": 3,
+      "tags": [
+       "a",
+       true
+      ]
+     }
+    },
+    {
+     "name": "note",
+     "label": "Note",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "note": "x"
+  },
+  "errors": {}
+ },
+ {
+  "name": "hidden changed text",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "fileId",
+     "type": "hidden",
+     "value": "f_123"
+    },
+    {
+     "name": "ctx",
+     "type": "hidden",
+     "value": {
+      "version": 3,
+      "tags": [
+       "a",
+       true
+      ]
+     }
+    },
+    {
+     "name": "note",
+     "label": "Note",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "fileId": "f_999"
+  },
+  "errors": {
+   "fileId": "fileId can't be changed"
+  }
+ },
+ {
+  "name": "hidden changed object",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "fileId",
+     "type": "hidden",
+     "value": "f_123"
+    },
+    {
+     "name": "ctx",
+     "type": "hidden",
+     "value": {
+      "version": 3,
+      "tags": [
+       "a",
+       true
+      ]
+     }
+    },
+    {
+     "name": "note",
+     "label": "Note",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "ctx": {
+    "version": 4,
+    "tags": [
+     "a",
+     true
+    ]
+   }
+  },
+  "errors": {
+   "ctx": "ctx can't be changed"
+  }
+ },
+ {
+  "name": "hidden sent as null",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "fileId",
+     "type": "hidden",
+     "value": "f_123"
+    },
+    {
+     "name": "ctx",
+     "type": "hidden",
+     "value": {
+      "version": 3,
+      "tags": [
+       "a",
+       true
+      ]
+     }
+    },
+    {
+     "name": "note",
+     "label": "Note",
+     "type": "text"
+    }
+   ]
+  },
+  "values": {
+   "fileId": null
+  },
+  "errors": {
+   "fileId": "fileId can't be changed"
+  }
+ },
+ {
+  "name": "hidden in notice",
+  "ask": {
+   "title": "T",
+   "mode": "notice",
+   "fields": [
+    {
+     "name": "id",
+     "type": "hidden",
+     "value": "x"
+    },
+    {
+     "name": "open",
+     "label": "Open",
+     "type": "link",
+     "href": "/files"
+    }
+   ]
+  },
+  "values": {},
+  "errors": {}
+ },
+ {
+  "name": "person rule sees id prefill as object, different ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "owner",
+     "label": "Owner",
+     "type": "person",
+     "readOnly": true,
+     "value": "u1",
+     "options": [
+      {
+       "value": "u1",
+       "label": "Ann"
+      }
+     ]
+    },
+    {
+     "name": "to",
+     "label": "To",
+     "type": "person"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notEqual",
+     "fields": [
+      "owner",
+      "to"
+     ],
+     "message": "Pick someone else"
+    }
+   ]
+  },
+  "values": {
+   "to": {
+    "id": "u2",
+    "label": "Bo"
+   }
+  },
+  "errors": {}
+ },
+ {
+  "name": "person rule sees id prefill as object, same id fails",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "owner",
+     "label": "Owner",
+     "type": "person",
+     "readOnly": true,
+     "value": "u1",
+     "options": [
+      {
+       "value": "u1",
+       "label": "Ann"
+      }
+     ]
+    },
+    {
+     "name": "to",
+     "label": "To",
+     "type": "person"
+    }
+   ],
+   "rules": [
+    {
+     "type": "notEqual",
+     "fields": [
+      "owner",
+      "to"
+     ],
+     "message": "Pick someone else"
+    }
+   ]
+  },
+  "values": {
+   "to": {
+    "id": "u1",
+    "label": "Ann (other label)"
+   }
+  },
+  "errors": {
+   "": "Pick someone else"
+  }
+ },
+ {
+  "name": "showIf on hidden value ok",
+  "ask": {
+   "title": "T",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "hidden",
+     "value": "file"
+    },
+    {
+     "name": "why",
+     "label": "Why",
+     "type": "text",
+     "required": true,
+     "showIf": {
+      "field": "kind",
+      "op": "eq",
+      "value": "file"
+     }
+    }
+   ]
+  },
+  "values": {},
+  "errors": {
+   "why": "Why is required"
+  }
  }
 ]

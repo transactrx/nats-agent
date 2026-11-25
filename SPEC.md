@@ -1,4 +1,4 @@
-# NATS Agent Protocol — Specification v1.7 (draft)
+# NATS Agent Protocol — Specification v1.8 (draft)
 
 A wire protocol for AI agents that live on NATS. Any process that implements
 this spec is an **agent**: it owns its own subject space, is discoverable the
@@ -240,7 +240,8 @@ Returned by discovery and by `trx.agent.<name>.card` (request body `{}`).
   that opted in (card `capabilities.userInput`) accepts an empty `content`
   (an answer-only turn) when at least one input is valid. The ack then
   carries `caps.inputSubject`, the per-run `trx.agent.<name>.input.<token>`
-  endpoint. See §14.
+  endpoint. See §14. v1.8: `userInput.features` lists the newer ask
+  components the caller can draw (`person`, `link`, `notice`; §14.9).
 
 **Authentication (v1.1):** requests to `chat`, `invoke`, `sessions*` carry the
 caller's Internal Delegation Token in NATS header `X-TRX-IDT`. An agent with
@@ -915,18 +916,21 @@ source of truth; `testdata/ask-vectors.json` holds shared test vectors). In
 summary:
 
 - Ask: `title` (required, ≤120 chars), `description` (≤500), `mode`
-  (`ask` default, `create`, `edit`, `confirm`), `danger`, `submitLabel`,
-  `sections[]`, `fields[]` (0–30; 0 only for `confirm`), `rules[]`.
+  (`ask` default, `create`, `edit`, `confirm`, `notice` v1.8), `danger`,
+  `submitLabel`, `sections[]`, `fields[]` (0–30; 0 only for `confirm` and
+  `notice`), `rules[]`.
 - Field `type`: `text` (`format` email/url/phone), `longText`, `number`,
   `choice` (`options`, `multiple`, `allowOther`), `toggle`, `checkbox`,
-  `date`, `time`, `datetime`, `dateRange`, `tags`, `table`; plus
+  `date`, `time`, `datetime`, `dateRange`, `tags`, `table`, and (v1.8)
+  `person` (`scope`), `link` (`href`), `hidden`; plus
   `required`, `readOnly`, `value` (prefill), `suggested`, bounds
   (`min`/`max`/`step`, lengths, `pattern`, item counts), `showIf`.
 - Rules: `after`, `notBefore`, `atLeastOne`, `equal`, `notEqual`.
 - Value encodings (timezone-safe): `date` `"YYYY-MM-DD"`; `time` `"HH:MM"`;
   `datetime` RFC 3339 with offset; `dateRange` `{"from","to"}` (+ `preset`);
   `choice` a value or array, Other as `{"other": "text"}`; `tags` string[];
-  `table` row object(s); `number` number; `toggle`/`checkbox` bool.
+  `table` row object(s); `number` number; `toggle`/`checkbox` bool;
+  `person` `{"id","label"}` or a list of them; `link` never has a value.
 - Limits: 30 fields, 8 sections, 200 options, 50 table rows, 32 KB payload.
   An ask over a limit is a tool error to the model, which can retry.
 - Validation covers required, type/format, bounds, options, date bounds,
@@ -972,3 +976,82 @@ summary:
 - `Stream.AnswerAsk(askID, action, values)` answers the run's ask in
   process, with the same validation and reply as §14.3 (for a handler that
   routes answers itself).
+
+### 14.9 Person, link, hidden and notice (v1.8)
+
+Three ask components added in 1.8. A caller draws them only if it lists them
+in `ChatRequest.userInput.features`:
+
+```json
+{ "userInput": { "supported": true, "features": ["person", "link", "notice"] } }
+```
+
+An agent never shows an ask that uses a component the caller did not list:
+Go `AskUser` returns `ErrUnsupported` (no event), exactly as for a caller
+without `userInput`. `features` absent = none (a 1.7 caller).
+
+**`person` field** (`type: "person"`): pick people.
+- Attributes: `multiple`, `minItems`/`maxItems`, `required`, `readOnly`,
+  `help`, `options` (known people as quick picks: `value` = id, `label` =
+  name, `description` = email/account), `value` (prefill: an id, ids, or
+  `{"id","label"}` objects; labels for ids come from `options`), `scope`
+  (`"account"`, the default = people in the signed-in user's account; other
+  values are reserved and invalid now).
+- Answer value: `{"id": "...", "label": "..."}` (non-`multiple`) or a list of
+  them. Exactly the keys `id` (non-empty text) and `label` (optional text,
+  ≤200 characters); no id twice in a list. Messages: "<Label> must be a
+  person", "... must be a list of people", "... has a name longer than 200
+  characters", "... lists the same person twice", plus the usual required and
+  item-count messages.
+- `label` is display only: the receiver MUST re-check every `id` (for
+  example, same account) before acting on it. Display and `FormatForModel`
+  show labels joined by ", " (the id when no label).
+- Read-only and edit-mode `changed` checks compare people by id set (order
+  and labels ignored), so a prefill given as ids matches its echoed objects.
+  Rules see a read-only id prefill as `{"id","label"}` objects, and
+  `equal`/`notEqual` between two person fields compare by id set.
+
+**`link` field** (`type: "link"`): a button.
+- Attributes: `label` (button text, required), `href` (required), `help`.
+  `href` is an app-relative path (`/…`, not `//…` or `/\…`) or an `https://`
+  URL with a host and no userinfo (`https://bank.com@evil.com` is invalid);
+  anything else (`http:`, `javascript:`, relative words) is an invalid ask.
+  A link can't be `required`, has no `value`/`suggested`, and can't be named
+  by a rule or by another field's `showIf`.
+- Display only: never in `values`, ignored by validation, dropped by
+  normalization. An app-relative href opens inside the caller's app, https
+  in a new tab.
+
+**`notice` mode** (`mode: "notice"`): a card that only informs.
+- Title, description, read-only fields and links; no Skip; one button
+  (`submitLabel`, default "OK"). Fields must be links or `readOnly`; no
+  `rules`.
+- It never blocks: the agent emits `ask` (with `waitMs: 0`) and right away
+  `askClosed{answered}`; Go `AskUser` returns an empty submitted Answer
+  (`AskID` set, no values) without waiting or parking. The card stays
+  visible after closing, with working links.
+
+**`hidden` field** (`type: "hidden"`): context the server carries through
+the form (item ids, version tags) without showing it.
+- Attributes: `name` and `value` (required; text, number, true/false, or a
+  list/object of those, no null). `label`, `help`, `required`, `suggested`,
+  `options`, `readOnly`, `section`, `placeholder` and `showIf` are invalid
+  (`showIf` could drop the server's context). Allowed in every mode,
+  including `notice`.
+- Clients MUST never render it. It is not a feature (no `userInput.features`
+  entry): an older client that drops unknown fields still works, because a
+  missing hidden value is filled from the ask.
+- Validation: if the answer carries the field, its value must equal `value`
+  exactly (JSON deep equal); anything else (including null) is "<name> can't
+  be changed". Normalization always sets it to the ask's `value`.
+- Answer: in `values` only; never in `display`, `changed`, or the text shown
+  to the model (`FormatForModel`). It is always present in `values`. Rules
+  can't name it ("hidden field has no user value"); another field's `showIf`
+  may, and it reads the ask's `value` even when the client omits it.
+
+Go: `ask.TypePerson`, `ask.TypeLink`, `ask.TypeHidden`, `ask.ModeNotice`, `ask.ScopeAccount`,
+`Field.Scope`, `Field.Href`, `ask.Person`, `ask.PersonValues(v)`;
+`wire.FeaturePerson`, `wire.FeatureLink`, `wire.FeatureNotice`,
+`wire.InputFeatures()` (a fresh copy; `wire.AllInputFeatures` kept for compatibility), `(*wire.UserInputSupport).Has(feature)`;
+`agentclient.ChatOptions.UserInputFeatures`. Shared vectors for the new
+validation rules are in `pkg/ask/testdata/ask-vectors.json`.
